@@ -1,0 +1,28 @@
+# Local secrets
+.env
+.env.*
+!.env.example
+
+# Project-local Python runtime and dependencies
+.python/
+.venv/
+.uv-cache/
+
+# Python/test caches
+__pycache__/
+*.py[cod]
+.pytest_cache/
+tests_runtime/
+.coverage
+htmlcov/
+
+# Runtime output
+output/*.json
+output/*.tmp
+logs/*.log
+
+# Editors and operating systems
+.idea/
+.vscode/
+.DS_Store
+Thumbs.db
