@@ -1,4 +1,4 @@
-"""Tests for the read-only Feishu Bitable client."""
+"""Tests for Feishu authentication and message resource downloads."""
 
 from __future__ import annotations
 
@@ -11,9 +11,9 @@ import pytest
 import requests
 
 from clients.feishu_client import (
-    FeishuApiError,
     FeishuAuthenticationError,
-    FeishuBitableClient,
+    FeishuClient,
+    FeishuFileDownloadError,
     FeishuNetworkError,
     mask_token,
 )
@@ -59,17 +59,27 @@ class FakeResponse:
         self.closed = True
 
 
+class FakeStreamingResponse(FakeResponse):
+    """Response stand-in that yields deterministic binary chunks."""
+
+    def __init__(self, chunks: list[bytes], **kwargs: Any) -> None:
+        super().__init__({}, **kwargs)
+        self.chunks = chunks
+
+    def iter_content(self, chunk_size: int) -> list[bytes]:
+        assert chunk_size > 0
+        return self.chunks
+
+
 def _settings(project_tmp_dir: Path) -> Settings:
     """Return complete settings with inert test identifiers."""
 
     return Settings(
         app_id="cli_test",
         app_secret=TEST_SECRET,
-        app_token="bascn_test",
-        standard_detail_table_id="tbl_detail",
-        person_summary_table_id="tbl_summary",
-        output_dir=project_tmp_dir / "output",
         log_dir=project_tmp_dir / "logs",
+        inbox_dir=project_tmp_dir / "data" / "inbox",
+        max_download_bytes=1024,
         log_level="INFO",
     )
 
@@ -81,7 +91,7 @@ def _client(
     clock: Any = None,
     max_retries: int = 0,
     sleep: Any = None,
-) -> FeishuBitableClient:
+) -> FeishuClient:
     """Build a client with retries disabled unless a test opts in."""
 
     kwargs: dict[str, Any] = {
@@ -91,7 +101,7 @@ def _client(
     }
     if clock is not None:
         kwargs["clock"] = clock
-    return FeishuBitableClient(_settings(project_tmp_dir), **kwargs)
+    return FeishuClient(_settings(project_tmp_dir), **kwargs)
 
 
 def test_get_tenant_access_token_success(project_tmp_dir: Path) -> None:
@@ -127,6 +137,98 @@ def test_tenant_access_token_is_reused_while_valid(project_tmp_dir: Path) -> Non
     now[0] += 600
     assert client.get_tenant_access_token() == "t-cached"
     assert session.request.call_count == 1
+
+
+def test_download_message_resource_streams_atomically(project_tmp_dir: Path) -> None:
+    """Message resources are streamed into a completed file only after success."""
+
+    session = Mock(spec=requests.Session)
+    session.request.side_effect = [
+        FakeResponse(
+            {"code": 0, "tenant_access_token": "t-download-token", "expire": 7200}
+        ),
+        FakeStreamingResponse([b"first-", b"second"], headers={"Content-Length": "12"}),
+    ]
+    client = _client(project_tmp_dir, session)
+    destination = project_tmp_dir / "inbox" / "report.xlsx"
+
+    result = client.download_message_resource(
+        "om_test",
+        "file_test",
+        destination,
+        max_bytes=100,
+    )
+
+    assert result == 12
+    assert destination.read_bytes() == b"first-second"
+    assert not destination.with_name("report.xlsx.part").exists()
+    request = session.request.call_args_list[1].kwargs
+    assert request["method"] == "GET"
+    assert request["params"] == {"type": "file"}
+    assert request["stream"] is True
+    assert request["headers"]["Authorization"] == "Bearer t-download-token"
+
+
+def test_download_message_resource_rejects_declared_oversize_file(
+    project_tmp_dir: Path,
+) -> None:
+    """A too-large resource never creates a partial file in the inbox."""
+
+    session = Mock(spec=requests.Session)
+    stream_response = FakeStreamingResponse([b"unused"], headers={"Content-Length": "101"})
+    session.request.side_effect = [
+        FakeResponse(
+            {"code": 0, "tenant_access_token": "t-download-token", "expire": 7200}
+        ),
+        stream_response,
+    ]
+    client = _client(project_tmp_dir, session)
+    destination = project_tmp_dir / "inbox" / "too-large.xlsx"
+
+    with pytest.raises(FeishuFileDownloadError, match="超过本地限制"):
+        client.download_message_resource("om_test", "file_test", destination, max_bytes=100)
+
+    assert not destination.exists()
+    assert not destination.with_name("too-large.xlsx.part").exists()
+    assert stream_response.closed is True
+
+
+def test_download_message_resource_reports_api_error_without_credentials(
+    project_tmp_dir: Path,
+) -> None:
+    """Failed downloads surface Feishu diagnostics without leaking secrets."""
+
+    token = "t-full-token-must-not-leak"
+    session = Mock(spec=requests.Session)
+    session.request.side_effect = [
+        FakeResponse({"code": 0, "tenant_access_token": token, "expire": 7200}),
+        FakeResponse(
+            {
+                "code": 99991672,
+                "msg": f"Access denied {TEST_SECRET} {token}",
+            },
+            status_code=403,
+            headers={"X-Tt-Logid": "log-id-403"},
+        ),
+    ]
+    client = _client(project_tmp_dir, session)
+    destination = project_tmp_dir / "inbox" / "denied.xlsx"
+
+    with pytest.raises(FeishuFileDownloadError) as exc_info:
+        client.download_message_resource(
+            "om_test",
+            "file_test",
+            destination,
+            max_bytes=100,
+        )
+
+    message = str(exc_info.value)
+    assert "HTTP状态码=403" in message
+    assert "code=99991672" in message
+    assert "request_id=log-id-403" in message
+    assert TEST_SECRET not in message
+    assert token not in message
+    assert not destination.exists()
 
 
 def test_tenant_access_token_refreshes_before_expiry(project_tmp_dir: Path) -> None:
@@ -178,82 +280,6 @@ def test_mask_token_never_reveals_short_values() -> None:
     assert mask_token("x") == "***"
     assert mask_token("short-token") == "***"
     assert mask_token("t-long-token-value") == "t-long-t...alue"
-
-
-def test_authenticated_request_adds_required_headers(project_tmp_dir: Path) -> None:
-    """The unified request method adds Bearer auth and JSON content type."""
-
-    session = Mock(spec=requests.Session)
-    session.request.side_effect = [
-        FakeResponse(
-            {"code": 0, "tenant_access_token": "t-private-token", "expire": 7200}
-        ),
-        FakeResponse({"code": 0, "msg": "ok", "data": {"items": []}}),
-    ]
-    client = _client(project_tmp_dir, session)
-
-    result = client._request("GET", "/bitable/v1/example", params={"page_size": 10})
-
-    assert result["code"] == 0
-    api_request = session.request.call_args_list[1].kwargs
-    assert api_request["headers"]["Authorization"] == "Bearer t-private-token"
-    assert api_request["headers"]["Content-Type"] == "application/json; charset=utf-8"
-    assert api_request["timeout"] == 30.0
-
-
-def test_api_business_error_contains_diagnostics_without_credentials(
-    project_tmp_dir: Path,
-) -> None:
-    """Business errors include useful context while redacting known credentials."""
-
-    token = "t-full-token-must-not-leak"
-    session = Mock(spec=requests.Session)
-    session.request.side_effect = [
-        FakeResponse({"code": 0, "tenant_access_token": token, "expire": 7200}),
-        FakeResponse(
-            {
-                "code": 1254302,
-                "msg": f"permission denied {TEST_SECRET} {token}",
-                "request_id": "request-from-json",
-            }
-        ),
-    ]
-    client = _client(project_tmp_dir, session)
-
-    with pytest.raises(FeishuApiError) as exc_info:
-        client._request("GET", "/bitable/v1/forbidden")
-
-    message = str(exc_info.value)
-    assert "HTTP状态码=200" in message
-    assert "code=1254302" in message
-    assert "request_id=request-from-json" in message
-    assert "/bitable/v1/forbidden" in message
-    assert TEST_SECRET not in message
-    assert token not in message
-
-
-def test_http_error_is_converted_to_clear_api_error(project_tmp_dir: Path) -> None:
-    """Non-retryable HTTP errors are raised immediately with Feishu details."""
-
-    session = Mock(spec=requests.Session)
-    session.request.side_effect = [
-        FakeResponse({"code": 0, "tenant_access_token": "t-token", "expire": 7200}),
-        FakeResponse(
-            {"code": 99991672, "msg": "Access denied"},
-            status_code=403,
-            headers={"X-Tt-Logid": "log-id-403"},
-        ),
-    ]
-    client = _client(project_tmp_dir, session, max_retries=3)
-
-    with pytest.raises(FeishuApiError) as exc_info:
-        client._request("GET", "/bitable/v1/forbidden")
-
-    message = str(exc_info.value)
-    assert "HTTP状态码=403" in message
-    assert "code=99991672" in message
-    assert "request_id=log-id-403" in message
-    assert session.request.call_count == 2
 
 
 def test_timeout_is_retried_at_most_configured_times(project_tmp_dir: Path) -> None:
@@ -346,173 +372,6 @@ def test_non_json_error_has_bounded_response_excerpt(project_tmp_dir: Path) -> N
     assert len(message) < 500
 
 
-def test_list_fields_reads_every_page_and_preserves_raw_fields(
-    project_tmp_dir: Path,
-) -> None:
-    """Field listing follows page tokens and returns complete raw objects."""
-
-    session = Mock(spec=requests.Session)
-    client = _client(project_tmp_dir, session)
-    first_field = {
-        "field_id": "fld_1",
-        "field_name": "客户名称",
-        "type": 1,
-        "is_primary": True,
-        "property": {"extra": "preserved"},
-    }
-    second_field = {
-        "field_id": "fld_2",
-        "field_name": "签约金额",
-        "type": 2,
-        "is_primary": False,
-    }
-    client._request = Mock(
-        side_effect=[
-            {
-                "code": 0,
-                "data": {
-                    "items": [first_field],
-                    "has_more": True,
-                    "page_token": "page-2",
-                },
-            },
-            {
-                "code": 0,
-                "data": {"items": [second_field], "has_more": False},
-            },
-        ]
-    )
-
-    assert client.list_fields("tbl_test") == [first_field, second_field]
-    first_call, second_call = client._request.call_args_list
-    assert first_call.args[0] == "GET"
-    assert first_call.kwargs["params"] == {"page_size": 100}
-    assert second_call.kwargs["params"] == {
-        "page_size": 100,
-        "page_token": "page-2",
-    }
-
-
-def test_list_fields_rejects_broken_pagination(project_tmp_dir: Path) -> None:
-    """A has-more response without a token cannot create an endless loop."""
-
-    client = _client(project_tmp_dir, Mock(spec=requests.Session))
-    client._request = Mock(
-        return_value={"code": 0, "data": {"items": [], "has_more": True}}
-    )
-
-    with pytest.raises(FeishuApiError, match="缺少 page_token"):
-        client.list_fields("tbl_test")
-
-
-def test_search_records_reads_every_page_and_requests_automatic_fields(
-    project_tmp_dir: Path,
-) -> None:
-    """Record search follows pagination and asks Feishu for real timestamps."""
-
-    client = _client(project_tmp_dir, Mock(spec=requests.Session))
-    record_1 = {
-        "record_id": "rec_1",
-        "fields": {"客户": "甲"},
-        "created_time": "1700000000000",
-        "last_modified_time": "1700000001000",
-    }
-    record_2 = {"record_id": "rec_2", "fields": {"客户": "乙"}}
-    client._request = Mock(
-        side_effect=[
-            {
-                "code": 0,
-                "data": {
-                    "items": [record_1],
-                    "has_more": True,
-                    "page_token": "next-record-page",
-                },
-            },
-            {
-                "code": 0,
-                "data": {"items": [record_2], "has_more": False},
-            },
-        ]
-    )
-
-    assert client.search_records("tbl_test", page_size=200) == [record_1, record_2]
-    first_call, second_call = client._request.call_args_list
-    assert first_call.args[0] == "POST"
-    assert first_call.kwargs["params"] == {"page_size": 200}
-    assert first_call.kwargs["json"] == {"automatic_fields": True}
-    assert second_call.kwargs["params"] == {
-        "page_size": 200,
-        "page_token": "next-record-page",
-    }
-
-
-def test_search_records_honors_max_records(project_tmp_dir: Path) -> None:
-    """The total limit stops reads and trims an unexpectedly large page."""
-
-    client = _client(project_tmp_dir, Mock(spec=requests.Session))
-    records = [
-        {"record_id": f"rec_{index}", "fields": {}}
-        for index in range(5)
-    ]
-    client._request = Mock(
-        return_value={
-            "code": 0,
-            "data": {
-                "items": records,
-                "has_more": True,
-                "page_token": "unused-next-page",
-            },
-        }
-    )
-
-    assert client.search_records("tbl_test", page_size=100, max_records=3) == records[:3]
-    assert client._request.call_count == 1
-    assert client._request.call_args.kwargs["params"] == {"page_size": 3}
-
-
-def test_search_records_honors_max_records_across_pages(
-    project_tmp_dir: Path,
-) -> None:
-    """The final page shrinks to exactly the remaining requested count."""
-
-    client = _client(project_tmp_dir, Mock(spec=requests.Session))
-    first_page = [
-        {"record_id": "rec_1", "fields": {}},
-        {"record_id": "rec_2", "fields": {}},
-    ]
-    last_record = {"record_id": "rec_3", "fields": {}}
-    client._request = Mock(
-        side_effect=[
-            {
-                "code": 0,
-                "data": {
-                    "items": first_page,
-                    "has_more": True,
-                    "page_token": "last-page",
-                },
-            },
-            {
-                "code": 0,
-                "data": {
-                    "items": [last_record],
-                    "has_more": True,
-                    "page_token": "unused-page",
-                },
-            },
-        ]
-    )
-
-    result = client.search_records("tbl_test", page_size=2, max_records=3)
-
-    assert result == [*first_page, last_record]
-    first_call, second_call = client._request.call_args_list
-    assert first_call.kwargs["params"] == {"page_size": 2}
-    assert second_call.kwargs["params"] == {
-        "page_size": 1,
-        "page_token": "last-page",
-    }
-
-
 def test_retry_logs_do_not_expose_credentials(
     project_tmp_dir: Path,
     caplog: pytest.LogCaptureFixture,
@@ -522,37 +381,13 @@ def test_retry_logs_do_not_expose_credentials(
     token = "t-private-token-for-log-test"
     session = Mock(spec=requests.Session)
     session.request.side_effect = [
-        FakeResponse({"code": 0, "tenant_access_token": token, "expire": 7200}),
         requests.Timeout(f"timeout {TEST_SECRET} {token}"),
-        FakeResponse({"code": 0, "data": {"items": []}}),
+        FakeResponse({"code": 0, "tenant_access_token": token, "expire": 7200}),
     ]
     client = _client(project_tmp_dir, session, max_retries=1)
 
     with caplog.at_level("WARNING"):
-        client._request("GET", "/bitable/v1/safe-log-test")
+        assert client.get_tenant_access_token() == token
 
     assert TEST_SECRET not in caplog.text
     assert token not in caplog.text
-
-
-@pytest.mark.parametrize("page_size", [0, 501])
-def test_search_records_validates_page_size(
-    project_tmp_dir: Path,
-    page_size: int,
-) -> None:
-    """The client never sends a page size outside Feishu's documented range."""
-
-    client = _client(project_tmp_dir, Mock(spec=requests.Session))
-
-    with pytest.raises(ValueError, match="page_size"):
-        client.search_records("tbl_test", page_size=page_size)
-
-
-def test_search_records_zero_limit_makes_no_request(project_tmp_dir: Path) -> None:
-    """A zero total limit is a valid local no-op."""
-
-    client = _client(project_tmp_dir, Mock(spec=requests.Session))
-    client._request = Mock()
-
-    assert client.search_records("tbl_test", max_records=0) == []
-    client._request.assert_not_called()

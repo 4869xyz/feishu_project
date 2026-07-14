@@ -16,12 +16,11 @@ DEFAULT_ENV_FILE = PROJECT_ROOT / ".env"
 REQUIRED_ENV_VARS = (
     "FEISHU_APP_ID",
     "FEISHU_APP_SECRET",
-    "FEISHU_APP_TOKEN",
-    "STANDARD_DETAIL_TABLE_ID",
-    "PERSON_SUMMARY_TABLE_ID",
 )
 
 VALID_LOG_LEVELS = {"CRITICAL", "ERROR", "WARNING", "INFO", "DEBUG"}
+DEFAULT_INBOX_DIR = "./data/inbox"
+MAX_MESSAGE_RESOURCE_BYTES = 100 * 1024 * 1024
 
 
 class ConfigurationError(ValueError):
@@ -30,15 +29,13 @@ class ConfigurationError(ValueError):
 
 @dataclass(frozen=True, slots=True)
 class Settings:
-    """Validated configuration required by the read-only Feishu client."""
+    """Validated configuration required by the Feishu bot listener."""
 
     app_id: str
     app_secret: str = field(repr=False)
-    app_token: str
-    standard_detail_table_id: str
-    person_summary_table_id: str
-    output_dir: Path
     log_dir: Path
+    inbox_dir: Path
+    max_download_bytes: int
     log_level: str
 
 
@@ -66,13 +63,31 @@ def _read_values(
     return values
 
 
-def _resolve_output_dir(raw_value: str, project_root: Path) -> Path:
-    """Resolve a configured output directory relative to the project root."""
+def _resolve_project_path(raw_value: str, project_root: Path) -> Path:
+    """Resolve a configured path relative to the project root."""
 
-    output_dir = Path(raw_value).expanduser()
-    if not output_dir.is_absolute():
-        output_dir = project_root / output_dir
-    return output_dir.resolve()
+    path = Path(raw_value).expanduser()
+    if not path.is_absolute():
+        path = project_root / path
+    return path.resolve()
+
+
+def _parse_max_download_bytes(raw_value: str) -> int:
+    """Validate the optional local cap for downloaded message resources."""
+
+    try:
+        value = int(raw_value)
+    except ValueError as exc:
+        raise ConfigurationError(
+            "无效环境变量：FEISHU_MAX_DOWNLOAD_BYTES 必须是正整数"
+        ) from exc
+
+    if not 1 <= value <= MAX_MESSAGE_RESOURCE_BYTES:
+        raise ConfigurationError(
+            "无效环境变量：FEISHU_MAX_DOWNLOAD_BYTES 必须在 1 到 "
+            f"{MAX_MESSAGE_RESOURCE_BYTES} 之间"
+        )
+    return value
 
 
 def load_settings(
@@ -87,7 +102,7 @@ def load_settings(
         env_file: Dotenv file to load. Pass ``None`` to use environment values only.
         environ: Optional environment mapping, primarily useful for tests. Values in
             this mapping override values loaded from ``env_file``.
-        project_root: Base directory used for relative output and log paths.
+        project_root: Base directory used for relative inbox and log paths.
 
     Raises:
         ConfigurationError: If a required value is absent or a local directory
@@ -114,23 +129,25 @@ def load_settings(
             f"无效环境变量：LOG_LEVEL={log_level!r}，可选值：{allowed}"
         )
 
-    output_value = values.get("LOCAL_OUTPUT_DIR", "./output").strip() or "./output"
-    output_dir = _resolve_output_dir(output_value, root)
     log_dir = (root / "logs").resolve()
+    inbox_value = values.get("FEISHU_INBOX_DIR", DEFAULT_INBOX_DIR).strip()
+    inbox_dir = _resolve_project_path(inbox_value or DEFAULT_INBOX_DIR, root)
+    max_download_raw = values.get(
+        "FEISHU_MAX_DOWNLOAD_BYTES", str(MAX_MESSAGE_RESOURCE_BYTES)
+    ).strip()
+    max_download_bytes = _parse_max_download_bytes(max_download_raw)
 
     try:
-        output_dir.mkdir(parents=True, exist_ok=True)
         log_dir.mkdir(parents=True, exist_ok=True)
+        inbox_dir.mkdir(parents=True, exist_ok=True)
     except OSError as exc:
         raise ConfigurationError(f"无法创建本地运行目录：{exc}") from exc
 
     return Settings(
         app_id=required["FEISHU_APP_ID"],
         app_secret=required["FEISHU_APP_SECRET"],
-        app_token=required["FEISHU_APP_TOKEN"],
-        standard_detail_table_id=required["STANDARD_DETAIL_TABLE_ID"],
-        person_summary_table_id=required["PERSON_SUMMARY_TABLE_ID"],
-        output_dir=output_dir,
         log_dir=log_dir,
+        inbox_dir=inbox_dir,
+        max_download_bytes=max_download_bytes,
         log_level=log_level,
     )

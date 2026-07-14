@@ -16,10 +16,10 @@ tests_runtime/
 .coverage
 htmlcov/
 
-# Runtime output
-output/*.json
-output/*.tmp
+# Runtime logs and downloaded attachments
 logs/*.log
+data/inbox/*
+!data/inbox/.gitkeep
 
 # Editors and operating systems
 .idea/

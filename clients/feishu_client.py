@@ -1,11 +1,13 @@
-"""Read-only client for Feishu authentication and Bitable APIs."""
+"""Feishu client for authentication and IM message resource downloads."""
 
 from __future__ import annotations
 
 import logging
+import os
 import threading
 import time
 from collections.abc import Callable
+from pathlib import Path
 from typing import Any
 from urllib.parse import quote
 
@@ -26,8 +28,7 @@ REQUEST_ID_HEADERS = (
     "X-Request-Id",
     "X-Lark-Request-Id",
 )
-FIELD_PAGE_SIZE = 100
-MAX_RECORD_PAGE_SIZE = 500
+DOWNLOAD_CHUNK_SIZE = 64 * 1024
 
 
 class FeishuClientError(RuntimeError):
@@ -46,6 +47,10 @@ class FeishuAuthenticationError(FeishuApiError):
     """Raised when tenant access token acquisition fails."""
 
 
+class FeishuFileDownloadError(FeishuApiError):
+    """Raised when a file attached to an IM message cannot be downloaded."""
+
+
 def mask_token(token: str) -> str:
     """Return a token-safe representation suitable for terminal output."""
 
@@ -56,8 +61,8 @@ def mask_token(token: str) -> str:
     return f"{token[:8]}...{token[-4:]}"
 
 
-class FeishuBitableClient:
-    """Read-only Feishu Bitable client backed by one ``requests.Session``."""
+class FeishuClient:
+    """Feishu HTTP client for auth and message attachment downloads."""
 
     AUTH_PATH = "/auth/v3/tenant_access_token/internal"
 
@@ -300,184 +305,101 @@ class FeishuBitableClient:
             self._token_expires_at = self._clock() + float(expire)
             return token
 
-    def _request(
+    def download_message_resource(
         self,
-        method: str,
-        path: str,
-        **kwargs: Any,
-    ) -> dict[str, Any]:
-        """Send an authenticated request and validate Feishu's response.
-
-        The method is intentionally private because this project exposes only
-        explicit read operations. It never accepts a caller-provided
-        ``Authorization`` header.
-        """
-
-        normalized_path = path if path.startswith("/") else f"/{path}"
-        token = self.get_tenant_access_token()
-        custom_headers = kwargs.pop("headers", {}) or {}
-        headers = {
-            **custom_headers,
-            "Authorization": f"Bearer {token}",
-            "Content-Type": "application/json; charset=utf-8",
-        }
-
-        response = self._send_with_retries(
-            method.upper(),
-            f"{self.api_base_url}{normalized_path}",
-            path=normalized_path,
-            headers=headers,
-            **kwargs,
-        )
-        payload = self._decode_json(response, path=normalized_path)
-        if not response.ok or payload.get("code") != 0:
-            self._raise_api_error(
-                response,
-                payload,
-                path=normalized_path,
-                prefix="飞书 API 请求失败",
-            )
-        return payload
-
-    @staticmethod
-    def _response_data(payload: dict[str, Any], *, path: str) -> dict[str, Any]:
-        """Return a validated Feishu ``data`` object."""
-
-        data = payload.get("data")
-        if not isinstance(data, dict):
-            raise FeishuApiError(f"飞书响应缺少有效 data 对象：path={path}")
-        return data
-
-    @staticmethod
-    def _response_items(data: dict[str, Any], *, path: str) -> list[dict[str, Any]]:
-        """Return a validated page of item dictionaries."""
-
-        items = data.get("items", [])
-        if not isinstance(items, list) or any(not isinstance(item, dict) for item in items):
-            raise FeishuApiError(f"飞书响应中的 items 结构无效：path={path}")
-        return items
-
-    @staticmethod
-    def _next_page_token(
-        data: dict[str, Any],
+        message_id: str,
+        file_key: str,
+        destination: str | Path,
         *,
-        path: str,
-        seen_tokens: set[str],
-    ) -> str | None:
-        """Validate pagination metadata and guard against endless loops."""
+        max_bytes: int,
+    ) -> int:
+        """Download one file-message resource atomically and return its byte size.
 
-        if not data.get("has_more", False):
-            return None
-
-        page_token = data.get("page_token")
-        if not isinstance(page_token, str) or not page_token:
-            raise FeishuApiError(
-                f"飞书响应指示仍有下一页，但缺少 page_token：path={path}"
-            )
-        if page_token in seen_tokens:
-            raise FeishuApiError(
-                f"飞书分页返回了重复 page_token，已停止读取：path={path}"
-            )
-        seen_tokens.add(page_token)
-        return page_token
-
-    def _table_path(self, table_id: str, suffix: str) -> str:
-        """Build an encoded Bitable path for a configured Base and table."""
-
-        normalized_table_id = table_id.strip()
-        if not normalized_table_id:
-            raise ValueError("table_id 不能为空")
-        app_token = quote(self.settings.app_token, safe="")
-        encoded_table_id = quote(normalized_table_id, safe="")
-        return f"/bitable/v1/apps/{app_token}/tables/{encoded_table_id}/{suffix}"
-
-    def list_fields(self, table_id: str) -> list[dict[str, Any]]:
-        """Read every field from a Bitable table using pagination."""
-
-        path = self._table_path(table_id, "fields")
-        fields: list[dict[str, Any]] = []
-        page_token: str | None = None
-        seen_tokens: set[str] = set()
-
-        while True:
-            params: dict[str, Any] = {"page_size": FIELD_PAGE_SIZE}
-            if page_token is not None:
-                params["page_token"] = page_token
-
-            payload = self._request("GET", path, params=params)
-            data = self._response_data(payload, path=path)
-            fields.extend(self._response_items(data, path=path))
-            page_token = self._next_page_token(
-                data,
-                path=path,
-                seen_tokens=seen_tokens,
-            )
-            if page_token is None:
-                return fields
-
-    def search_records(
-        self,
-        table_id: str,
-        page_size: int = 100,
-        max_records: int | None = None,
-    ) -> list[dict[str, Any]]:
-        """Read Bitable records with pagination and an optional total limit.
-
-        The official search endpoint permits at most 500 records per page.
-        ``automatic_fields`` is enabled so Feishu can return its real
-        ``created_time`` and ``last_modified_time`` properties when available.
+        The Feishu IM resource endpoint returns a binary stream rather than a
+        JSON envelope. Download to a sibling ``.part`` file first so callers
+        never mistake an interrupted transfer for a complete Excel workbook.
         """
 
-        if isinstance(page_size, bool) or not isinstance(page_size, int):
-            raise TypeError("page_size 必须是整数")
-        if not 1 <= page_size <= MAX_RECORD_PAGE_SIZE:
-            raise ValueError(
-                f"page_size 必须在 1 到 {MAX_RECORD_PAGE_SIZE} 之间"
+        normalized_message_id = message_id.strip()
+        normalized_file_key = file_key.strip()
+        if not normalized_message_id:
+            raise ValueError("message_id 不能为空")
+        if not normalized_file_key:
+            raise ValueError("file_key 不能为空")
+        if isinstance(max_bytes, bool) or not isinstance(max_bytes, int) or max_bytes <= 0:
+            raise ValueError("max_bytes 必须是正整数")
+
+        path = (
+            "/im/v1/messages/"
+            f"{quote(normalized_message_id, safe='')}/resources/"
+            f"{quote(normalized_file_key, safe='')}"
+        )
+        token = self.get_tenant_access_token()
+        response = self._send_with_retries(
+            "GET",
+            f"{self.api_base_url}{path}",
+            path=path,
+            headers={"Authorization": f"Bearer {token}"},
+            params={"type": "file"},
+            stream=True,
+        )
+
+        if not response.ok:
+            try:
+                payload = self._decode_json(
+                    response,
+                    path=path,
+                    error_class=FeishuFileDownloadError,
+                )
+                self._raise_api_error(
+                    response,
+                    payload,
+                    path=path,
+                    prefix="飞书文件下载失败",
+                    error_class=FeishuFileDownloadError,
+                )
+            finally:
+                response.close()
+
+        content_length = response.headers.get("Content-Length")
+        if content_length is not None:
+            try:
+                declared_size = int(content_length)
+            except ValueError:
+                declared_size = None
+            if declared_size is not None and declared_size > max_bytes:
+                response.close()
+                raise FeishuFileDownloadError(
+                    f"文件大小超过本地限制：size={declared_size}, max_bytes={max_bytes}"
+                )
+
+        target = Path(destination).resolve()
+        temporary = target.with_name(f"{target.name}.part")
+        bytes_written = 0
+        try:
+            target.parent.mkdir(parents=True, exist_ok=True)
+            temporary.unlink(missing_ok=True)
+            with temporary.open("wb") as output:
+                for chunk in response.iter_content(chunk_size=DOWNLOAD_CHUNK_SIZE):
+                    if not chunk:
+                        continue
+                    bytes_written += len(chunk)
+                    if bytes_written > max_bytes:
+                        raise FeishuFileDownloadError(
+                            "文件大小超过本地限制："
+                            f"max_bytes={max_bytes}"
+                        )
+                    output.write(chunk)
+            os.replace(temporary, target)
+            return bytes_written
+        except (OSError, requests.RequestException) as exc:
+            temporary.unlink(missing_ok=True)
+            message = self._redact(
+                f"飞书文件下载失败：path={path}, error={exc}"
             )
-        if max_records is not None:
-            if isinstance(max_records, bool) or not isinstance(max_records, int):
-                raise TypeError("max_records 必须是整数或 None")
-            if max_records < 0:
-                raise ValueError("max_records 不能小于 0")
-
-        path = self._table_path(table_id, "records/search")
-        if max_records == 0:
-            return []
-
-        records: list[dict[str, Any]] = []
-        page_token: str | None = None
-        seen_tokens: set[str] = set()
-
-        while True:
-            remaining = (
-                None if max_records is None else max_records - len(records)
-            )
-            current_page_size = (
-                page_size if remaining is None else min(page_size, remaining)
-            )
-            params: dict[str, Any] = {"page_size": current_page_size}
-            if page_token is not None:
-                params["page_token"] = page_token
-
-            payload = self._request(
-                "POST",
-                path,
-                params=params,
-                json={"automatic_fields": True},
-            )
-            data = self._response_data(payload, path=path)
-            page_items = self._response_items(data, path=path)
-            if remaining is not None:
-                page_items = page_items[:remaining]
-            records.extend(page_items)
-
-            if max_records is not None and len(records) >= max_records:
-                return records
-
-            page_token = self._next_page_token(
-                data,
-                path=path,
-                seen_tokens=seen_tokens,
-            )
-            if page_token is None:
-                return records
+            raise FeishuFileDownloadError(message) from exc
+        except Exception:
+            temporary.unlink(missing_ok=True)
+            raise
+        finally:
+            response.close()

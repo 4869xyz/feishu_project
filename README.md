@@ -1,26 +1,26 @@
-# 飞书多维表格只读连接检查
+# 飞书机器人 Excel 附件下载
 
-这是一个最小的 Python 3.11 项目，用于验证企业自建应用能否连接飞书开放平台，并只读获取指定多维表格中的字段和记录。
+这是一个最小的 Python 3.11 项目：通过飞书长连接接收机器人消息，把直接发送的
+Excel 附件保存到本地 `data/inbox/`。
 
 当前版本只做以下事情：
 
-- 获取并在进程内缓存 `tenant_access_token`，到期前 5 分钟自动刷新；
-- 读取两张多维表格的字段结构；
-- 通过查询记录接口分页读取记录；
-- 每张表最多保留 3 条样例记录到本地检查报告；
-- 将检查过程写到终端，并生成 UTF-8 JSON 报告。
+- 使用 `app_id` / `app_secret` 建立飞书长连接；
+- 识别会话中直接上传的 `.xlsx`、`.xls`、`.xlsm` 文件；
+- 通过 IM 资源接口下载附件，写入本地收件箱；
+- 向发送方回复下载结果（成功、重复、格式不支持或失败）。
 
-项目没有实现任何飞书数据新增、更新或删除接口。
+项目没有实现多维表格读写、数据清洗、汇总或导入逻辑。
 
 ## 项目结构
 
 ```text
 .
+├── feishu_bot_listener.py   # 长连接入口：收消息并下载 Excel
 ├── config/                  # .env 加载、校验和本地目录初始化
-├── clients/                 # 飞书鉴权与多维表格只读客户端
-├── scripts/                 # 可执行连接检查脚本
+├── clients/                 # 鉴权、附件下载与消息解析
+├── data/inbox/              # Excel 收件箱（实际文件被 Git 忽略）
 ├── tests/                   # 不访问真实飞书的 pytest 测试
-├── output/                  # JSON 检查报告
 ├── logs/                    # 本地运行日志
 ├── .env.example
 ├── requirements.txt
@@ -75,74 +75,51 @@ copy .env.example .env
 ```dotenv
 FEISHU_APP_ID=
 FEISHU_APP_SECRET=
-FEISHU_APP_TOKEN=
 
-STANDARD_DETAIL_TABLE_ID=
-PERSON_SUMMARY_TABLE_ID=
-
-LOCAL_OUTPUT_DIR=./output
+FEISHU_INBOX_DIR=./data/inbox
+FEISHU_MAX_DOWNLOAD_BYTES=104857600
 LOG_LEVEL=INFO
 ```
 
 - `FEISHU_APP_ID`、`FEISHU_APP_SECRET`：企业自建应用凭证；
-- `FEISHU_APP_TOKEN`：多维表格 Base 的 `app_token`；
-- 两个 `*_TABLE_ID`：分别对应「签约标准明细表」和「签约个人汇总表」的 `table_id`；
-- `LOCAL_OUTPUT_DIR`：报告目录，相对路径按项目根目录解析；
+- `FEISHU_INBOX_DIR`：Excel 收件箱目录，相对路径按项目根目录解析；
+- `FEISHU_MAX_DOWNLOAD_BYTES`：单文件本地下载上限，默认 100 MB；
 - `LOG_LEVEL`：可选 `DEBUG`、`INFO`、`WARNING`、`ERROR`、`CRITICAL`。
 
 `.env` 已被 `.gitignore` 排除。不要把 App Secret、完整访问令牌或含真实密钥的 `.env` 提交到版本库。
 
 ## 飞书侧需要手动完成的配置
 
-代码不能代替你修改飞书开放平台后台。运行真实连接检查前，需要手动确认：
+代码不能代替你修改飞书开放平台后台。运行机器人前，需要手动确认：
 
-1. 应用是企业自建应用，并已启用所需的服务端 API 权限；
-2. 至少授予字段列表和记录查询所需的只读权限。飞书控制台通常显示为“查看、评论和导出多维表格”，或更细粒度的“获取数据表信息”“根据条件搜索记录”；
+1. 应用是企业自建应用，并已启用机器人能力与长连接；
+2. 至少授予获取与下载消息中文件资源所需的权限；
 3. 应用版本已经发布或在测试范围内生效；
-4. 目标 Base 已向该应用开放，应用在文档协作者或多维表格高级权限中具有相应读取权限；
-5. `.env` 中的 `app_token` 和两个 `table_id` 来自同一个目标 Base，并且值准确。
+4. 机器人已加入目标单聊或群聊。
 
-如果 Base 开启了高级权限，API 即使返回成功也可能因为调用身份没有对应数据权限而得到空记录。此时需要在 Base 的高级权限中为应用补充访问范围。
-
-## 运行连接检查
+## 运行机器人
 
 激活虚拟环境后执行：
 
 ```bash
-python -m scripts.check_connection
+python feishu_bot_listener.py
 ```
 
 也可以不激活环境，直接在 Windows 上执行：
 
 ```bat
-.venv\Scripts\python.exe -m scripts.check_connection
+.venv\Scripts\python.exe feishu_bot_listener.py
 ```
 
-脚本会依次执行鉴权，并检查：
+向机器人所在的单聊或群聊直接发送 `.xlsx`、`.xls` 或 `.xlsm` 文件后，程序会将文件保存至 `data/inbox/`。
 
-1. 签约标准明细表；
-2. 签约个人汇总表。
+下载采用临时 `.part` 文件后原子改名；同一消息重复投递时不会重复下载。实际 Excel 文件被 Git 忽略。该功能只处理会话中直接上传的附件，不处理云文档链接、卡片附件、合并转发子消息或保密消息。
 
-单张表失败不会阻断后续表。空表不算失败；字段读取成功且记录查询返回空列表时，该表仍视为可访问。
-
-进程退出码：
-
-- `0`：鉴权和两张表全部成功；
-- `1`：鉴权、表检查或报告写入至少一项失败；
-- `2`：本地配置缺失或无效。
-
-## 输出文件
-
-默认生成：
+日志默认写入：
 
 ```text
-output/feishu_connection_report.json
-logs/feishu_connection.log
+logs/feishu_bot_listener.log
 ```
-
-JSON 报告使用 UTF-8 编码和格式化缩进，包含鉴权是否成功、各表字段、最多 3 条样例记录和逐表错误。终端与日志只显示脱敏 token，不输出 App Secret、完整 token 或 Authorization 请求头。
-
-请注意：样例记录本身可能包含业务数据。`output/*.json` 已被 Git 忽略，仍应按公司数据安全要求保管。
 
 ## 运行测试
 
@@ -160,15 +137,12 @@ pytest
 
 ## 当前限制
 
-- 当前版本只支持读取，不支持向飞书写入、修改或删除数据；
-- 没有数据清洗、字段映射、去重、汇总或导入日志写入逻辑；
+- 只处理直接上传的 Excel 附件，不解析 Excel 内容；
+- 没有数据清洗、字段映射、去重、汇总或导入逻辑；
 - 没有数据库和 Web 服务；
-- token 缓存仅存在于当前进程，进程退出后不会落盘；
-- 报告只保存每张表最多 3 条样例记录，客户端方法本身支持分页读取更多记录；
-- 数据清洗和数据汇总将在下一阶段实现。
+- token 缓存仅存在于当前进程，进程退出后不会落盘。
 
 ## 官方接口参考
 
 - [获取 tenant_access_token](https://open.feishu.cn/document/server-docs/authentication-management/access-token/tenant_access_token_internal?lang=zh-CN)
-- [列出字段](https://open.feishu.cn/document/server-docs/docs/bitable-v1/app-table-field/list?lang=zh-CN)
-- [查询记录](https://open.feishu.cn/document/docs/bitable-v1/app-table-record/search?lang=zh-CN)
+- [获取消息中的资源文件](https://open.feishu.cn/document/server-docs/im-v1/message-resource/get?lang=zh-CN)
