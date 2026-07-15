@@ -1,38 +1,157 @@
-"""Receive Feishu messages and save direct Excel attachments into data/inbox."""
+"""Receive Feishu messages and persist Excel attachments or table links locally."""
 
 from __future__ import annotations
 
 import asyncio
+from contextlib import contextmanager
 import logging
+import os
+from pathlib import Path
+import re
 from typing import Any
 
-from lark_channel import FeishuChannel
+from lark_channel import FeishuChannel, PolicyConfig
 
 from clients.feishu_attachment import (
     ExcelAttachmentDownloader,
     UnsupportedExcelAttachment,
 )
 from clients.feishu_client import FeishuClient, FeishuClientError
+from clients.feishu_table_export import (
+    FeishuTableLinkExporter,
+    UnsupportedFeishuTableLink,
+    WikiTablePermissionError,
+)
 from config.settings import ConfigurationError, Settings, load_settings
 
 
 LOGGER = logging.getLogger(__name__)
+INSTANCE_LOCK_FILENAME = "feishu_bot_listener.lock"
+_SENSITIVE_QUERY_VALUE = re.compile(
+    r"(?i)([?&](?:access_key|ticket|access_token|app_secret)=)[^&\s\]]+"
+)
+WIKI_PERMISSION_REPLY = (
+    "已收到 Wiki 表格链接，但机器人没有读取该知识库节点的权限。\n\n"
+    "请确认当前应用已加入该知识库或文档，并拥有节点阅读和云文档导出权限，然后重新发送链接。"
+)
+
+
+class SingleInstanceError(RuntimeError):
+    """Raised when another listener already owns the runtime lock."""
+
+
+class CredentialSafeFormatter(logging.Formatter):
+    """Redact credentials that third-party SDKs embed in formatted URLs."""
+
+    def format(self, record: logging.LogRecord) -> str:
+        formatted = super().format(record)
+        return _SENSITIVE_QUERY_VALUE.sub(r"\1***", formatted)
 
 
 def _configure_logging(settings: Settings) -> None:
     """Configure credential-safe operational logging for the listener."""
 
+    formatter = CredentialSafeFormatter(
+        "%(asctime)s %(levelname)s %(name)s: %(message)s"
+    )
+    handlers: tuple[logging.Handler, ...] = (
+        logging.StreamHandler(),
+        logging.FileHandler(
+            settings.log_dir / "feishu_bot_listener.log",
+            encoding="utf-8",
+        ),
+    )
+    for handler in handlers:
+        handler.setFormatter(formatter)
+
     logging.basicConfig(
         level=getattr(logging, settings.log_level),
-        format="%(asctime)s %(levelname)s %(name)s: %(message)s",
-        handlers=(
-            logging.StreamHandler(),
-            logging.FileHandler(
-                settings.log_dir / "feishu_bot_listener.log",
-                encoding="utf-8",
-            ),
-        ),
+        handlers=handlers,
         force=True,
+    )
+
+    # The SDK installs its own stdout handler and also propagates to root.
+    # Removing that handler makes every Lark record pass through one pipeline.
+    lark_logger = logging.getLogger("Lark")
+    for handler in tuple(lark_logger.handlers):
+        lark_logger.removeHandler(handler)
+        handler.close()
+    lark_logger.propagate = True
+    lark_logger.setLevel(logging.WARNING)
+
+    # httpx INFO records include request URLs and user identifiers.
+    logging.getLogger("httpx").setLevel(logging.WARNING)
+
+
+def _lock_file(handle: Any) -> None:
+    """Acquire a non-blocking, one-byte process lock on an open file."""
+
+    handle.seek(0)
+    if os.name == "nt":
+        import msvcrt
+
+        msvcrt.locking(handle.fileno(), msvcrt.LK_NBLCK, 1)
+        return
+
+    import fcntl
+
+    fcntl.flock(handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+
+
+def _unlock_file(handle: Any) -> None:
+    """Release the platform-specific process lock held by ``handle``."""
+
+    handle.seek(0)
+    if os.name == "nt":
+        import msvcrt
+
+        msvcrt.locking(handle.fileno(), msvcrt.LK_UNLCK, 1)
+        return
+
+    import fcntl
+
+    fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
+
+
+@contextmanager
+def _single_instance_lock(lock_path: Path):
+    """Hold a cross-platform lock for the listener process lifetime."""
+
+    lock_path.parent.mkdir(parents=True, exist_ok=True)
+    handle = lock_path.open("a+b")
+    if lock_path.stat().st_size == 0:
+        handle.write(b"\0")
+        handle.flush()
+
+    try:
+        _lock_file(handle)
+    except OSError as exc:
+        handle.close()
+        raise SingleInstanceError(
+            "飞书机器人监听器已经在运行；请先停止旧实例后再启动。"
+        ) from exc
+
+    try:
+        yield
+    finally:
+        try:
+            _unlock_file(handle)
+        finally:
+            handle.close()
+
+
+def _create_channel(settings: Settings) -> FeishuChannel:
+    """Create a channel with explicit direct-message and group admission rules."""
+
+    return FeishuChannel(
+        app_id=settings.app_id,
+        app_secret=settings.app_secret,
+        policy=PolicyConfig(
+            dm_policy="open",
+            group_policy="open",
+            require_mention=True,
+            respond_to_mention_all=False,
+        ),
     )
 
 
@@ -53,61 +172,116 @@ async def _reply(channel: FeishuChannel, message: Any, text: str) -> None:
 
 async def handle_message(
     channel: FeishuChannel,
-    downloader: ExcelAttachmentDownloader,
+    attachment_downloader: ExcelAttachmentDownloader,
+    table_exporter: FeishuTableLinkExporter,
     message: Any,
     download_lock: asyncio.Lock,
 ) -> None:
-    """Download one Excel attachment without blocking the Channel event loop."""
+    """Handle one direct Excel attachment or supported Feishu table link."""
 
     try:
         async with download_lock:
-            result = await asyncio.to_thread(downloader.download_from_message, message)
+            attachment = await asyncio.to_thread(
+                attachment_downloader.download_from_message, message
+            )
+            table_export = None
+            if attachment is None:
+                table_export = await asyncio.to_thread(
+                    table_exporter.export_from_message, message
+                )
     except UnsupportedExcelAttachment as exc:
         await _reply(channel, message, f"未下载附件：{exc}")
         return
+    except WikiTablePermissionError:
+        await _reply(channel, message, WIKI_PERMISSION_REPLY)
+        return
+    except UnsupportedFeishuTableLink:
+        await _reply(channel, message, "当前链接不是可导出的销售表格。")
+        return
     except FeishuClientError as exc:
         LOGGER.warning(
-            "下载飞书附件失败：message_id=%s, error=%s",
+            "下载或导出飞书文件失败：message_id=%s, error=%s",
             getattr(message, "message_id", "unknown"),
             exc,
         )
-        await _reply(channel, message, "附件下载失败，请稍后重新发送该 Excel 文件。")
+        await _reply(channel, message, "文件下载或导出失败，请稍后重新发送该 Excel 文件或表格链接。")
+        return
+    except (OSError, ValueError) as exc:
+        LOGGER.warning(
+            "处理飞书消息的本地数据无效：message_id=%s, error=%s",
+            getattr(message, "message_id", "unknown"),
+            exc,
+        )
+        await _reply(channel, message, "处理消息时缺少必要信息，请稍后重新发送。")
         return
     except Exception:
         LOGGER.exception(
             "处理飞书消息失败：message_id=%s", getattr(message, "message_id", "unknown")
         )
-        await _reply(channel, message, "处理附件时发生本地错误，请稍后重试。")
+        await _reply(channel, message, "处理文件时发生本地错误，请稍后重试。")
         return
 
-    if result is None:
-        await _reply(channel, message, "已收到消息。请直接发送 .xlsx、.xls 或 .xlsm 文件。")
+    if attachment is not None:
+        if attachment.already_present:
+            text = f"该 Excel 已在本地收件箱中，无需重复下载：{attachment.path.name}"
+        else:
+            text = (
+                "Excel 已下载到本地收件箱："
+                f"{attachment.path.name}（{attachment.bytes_written} 字节）"
+            )
+        LOGGER.info(
+            "附件已就绪：path=%s, already_present=%s",
+            attachment.path,
+            attachment.already_present,
+        )
+        await _reply(channel, message, text)
         return
 
-    if result.already_present:
-        text = f"该 Excel 已在本地收件箱中，无需重复下载：{result.path.name}"
-    else:
-        text = f"Excel 已下载到本地收件箱：{result.path.name}（{result.bytes_written} 字节）"
-    LOGGER.info("附件已就绪：path=%s, already_present=%s", result.path, result.already_present)
-    await _reply(channel, message, text)
+    if table_export is not None:
+        LOGGER.info(
+            "飞书表格已归档：path=%s, type=%s",
+            table_export.path,
+            table_export.document_type,
+        )
+        await _reply(
+            channel,
+            message,
+            f"飞书表格已导出到本地归档：{table_export.path.name}（{table_export.bytes_written} 字节）",
+        )
+        return
+
+    await _reply(
+        channel,
+        message,
+        "已收到消息。请直接发送 .xlsx、.xls、.xlsm 附件，或飞书 Sheets/Wiki 表格链接。",
+    )
 
 
-async def main() -> None:
-    """Connect the bot and dispatch direct Excel attachment downloads."""
+async def _run_listener(settings: Settings) -> None:
+    """Connect one configured listener until it is stopped."""
 
-    settings = load_settings()
-    _configure_logging(settings)
-
-    channel = FeishuChannel(app_id=settings.app_id, app_secret=settings.app_secret)
-    downloader = ExcelAttachmentDownloader(
-        FeishuClient(settings),
+    channel = _create_channel(settings)
+    client = FeishuClient(settings)
+    attachment_downloader = ExcelAttachmentDownloader(
+        client,
         settings.inbox_dir,
+        max_bytes=settings.max_download_bytes,
+    )
+    table_exporter = FeishuTableLinkExporter(
+        client,
+        settings.archive_dir,
         max_bytes=settings.max_download_bytes,
     )
     download_lock = asyncio.Lock()
 
     async def on_message(message: Any) -> None:
-        await handle_message(channel, downloader, message, download_lock)
+        await handle_message(
+            channel,
+            attachment_downloader,
+            table_exporter,
+            message,
+            download_lock,
+        )
 
     async def on_error(error: Exception) -> None:
         LOGGER.error("飞书长连接发生异常：%s", error)
@@ -115,8 +289,23 @@ async def main() -> None:
     channel.on("message", on_message)
     channel.on("error", on_error)
 
-    LOGGER.info("正在连接飞书开放平台；Excel 收件箱：%s", settings.inbox_dir)
+    LOGGER.info(
+        "正在连接飞书开放平台；Excel 收件箱：%s；表格归档：%s",
+        settings.inbox_dir,
+        settings.archive_dir,
+    )
     await channel.connect()
+
+
+async def main() -> None:
+    """Run exactly one bot listener for the configured project instance."""
+
+    settings = load_settings()
+    _configure_logging(settings)
+
+    lock_path = settings.log_dir / INSTANCE_LOCK_FILENAME
+    with _single_instance_lock(lock_path):
+        await _run_listener(settings)
 
 
 if __name__ == "__main__":
@@ -124,5 +313,7 @@ if __name__ == "__main__":
         asyncio.run(main())
     except ConfigurationError as exc:
         print(f"配置错误：{exc}")
+    except SingleInstanceError as exc:
+        print(f"启动失败：{exc}")
     except KeyboardInterrupt:
         print("\n机器人已停止。")

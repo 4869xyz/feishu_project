@@ -20,6 +20,7 @@ REQUIRED_ENV_VARS = (
 
 VALID_LOG_LEVELS = {"CRITICAL", "ERROR", "WARNING", "INFO", "DEBUG"}
 DEFAULT_INBOX_DIR = "./data/inbox"
+DEFAULT_ARCHIVE_DIR = "./data/archive"
 MAX_MESSAGE_RESOURCE_BYTES = 100 * 1024 * 1024
 
 
@@ -35,6 +36,7 @@ class Settings:
     app_secret: str = field(repr=False)
     log_dir: Path
     inbox_dir: Path
+    archive_dir: Path
     max_download_bytes: int
     log_level: str
 
@@ -102,7 +104,7 @@ def load_settings(
         env_file: Dotenv file to load. Pass ``None`` to use environment values only.
         environ: Optional environment mapping, primarily useful for tests. Values in
             this mapping override values loaded from ``env_file``.
-        project_root: Base directory used for relative inbox and log paths.
+        project_root: Base directory used for relative inbox, archive, and log paths.
 
     Raises:
         ConfigurationError: If a required value is absent or a local directory
@@ -132,6 +134,8 @@ def load_settings(
     log_dir = (root / "logs").resolve()
     inbox_value = values.get("FEISHU_INBOX_DIR", DEFAULT_INBOX_DIR).strip()
     inbox_dir = _resolve_project_path(inbox_value or DEFAULT_INBOX_DIR, root)
+    archive_value = values.get("FEISHU_ARCHIVE_DIR", DEFAULT_ARCHIVE_DIR).strip()
+    archive_dir = _resolve_project_path(archive_value or DEFAULT_ARCHIVE_DIR, root)
     max_download_raw = values.get(
         "FEISHU_MAX_DOWNLOAD_BYTES", str(MAX_MESSAGE_RESOURCE_BYTES)
     ).strip()
@@ -140,6 +144,7 @@ def load_settings(
     try:
         log_dir.mkdir(parents=True, exist_ok=True)
         inbox_dir.mkdir(parents=True, exist_ok=True)
+        archive_dir.mkdir(parents=True, exist_ok=True)
     except OSError as exc:
         raise ConfigurationError(f"无法创建本地运行目录：{exc}") from exc
 
@@ -148,6 +153,7 @@ def load_settings(
         app_secret=required["FEISHU_APP_SECRET"],
         log_dir=log_dir,
         inbox_dir=inbox_dir,
+        archive_dir=archive_dir,
         max_download_bytes=max_download_bytes,
         log_level=log_level,
     )

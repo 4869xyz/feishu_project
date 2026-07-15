@@ -31,6 +31,7 @@ def test_load_settings_from_environment(project_tmp_dir: Path) -> None:
     assert settings.app_id == "cli_test"
     assert settings.app_secret == "test-secret-value"
     assert settings.inbox_dir == (project_tmp_dir / "data" / "inbox").resolve()
+    assert settings.archive_dir == (project_tmp_dir / "data" / "archive").resolve()
     assert settings.max_download_bytes == 100 * 1024 * 1024
     assert settings.log_level == "DEBUG"
 
@@ -72,6 +73,7 @@ def test_runtime_directories_are_created(project_tmp_dir: Path) -> None:
 
     environment = _valid_environment()
     environment["FEISHU_INBOX_DIR"] = "./custom-inbox"
+    environment["FEISHU_ARCHIVE_DIR"] = "./custom-archive"
 
     settings = load_settings(
         env_file=None,
@@ -81,6 +83,8 @@ def test_runtime_directories_are_created(project_tmp_dir: Path) -> None:
 
     assert settings.inbox_dir == (project_tmp_dir / "custom-inbox").resolve()
     assert settings.inbox_dir.is_dir()
+    assert settings.archive_dir == (project_tmp_dir / "custom-archive").resolve()
+    assert settings.archive_dir.is_dir()
     assert settings.log_dir == (project_tmp_dir / "logs").resolve()
     assert settings.log_dir.is_dir()
 

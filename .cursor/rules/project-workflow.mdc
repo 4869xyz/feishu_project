@@ -1,0 +1,38 @@
+---
+description: Python 飞书机器人项目的工程协作、计划执行与文档同步规范
+globs: "**/*"
+alwaysApply: true
+---
+
+# Project Workflow
+
+## 项目锚点
+
+- `ARCHITECTURE.md` 是当前模块、依赖方向和运行数据流的全局地图；开始任务前先阅读它。
+- 根 `README.md` 是使用与文档入口；目录级 `README.md` 说明局部职责。
+- `docs/templates/feature-plan-template.md` 是新功能计划模板。
+- `docs/plans/` 保存具体功能计划；`VersionLog.md` 记录已落地的实质变更。
+- 不要把 `.env`、访问令牌、真实附件或日志内容写入代码、计划或版本日志。
+
+## Plan 模式
+
+1. 先读取 `ARCHITECTURE.md`，再仅读取受影响目录的 README 与代码。
+2. 新需求在 `docs/plans/YYYY-MM-DD_<feature>_plan.md` 建立或更新计划；计划必须包含受影响文件、技术决策、原子化 Checklist、测试与待确认项。
+3. 尚未收到用户明确的“开始执行”“实现计划”或同等授权前，不修改业务代码、配置或测试。
+4. 发现现有设计与需求冲突、权限不足、数据安全风险或关键选择缺失时，先说明证据并提问，不自行扩大范围。
+
+## Agent 模式
+
+1. 以已确认计划为边界：优先只修改计划列出的文件；新增文件或扩大范围前说明原因。
+2. 每完成一个原子 Checklist 项，立即将状态从 `[ ]` 更新为 `[~]` 或 `[x]`；失败时记录原因和下一步。
+3. 功能闭环时更新受影响目录 README；模块、依赖、入口或数据流变化时同步更新 `ARCHITECTURE.md`。
+4. 业务代码、配置语义或工程规则发生实质变更时，同步更新 `VersionLog.md`。同一自然日只追加到同一日期块；纯空白或格式调整不记日志。
+5. 不重置、覆盖或删除用户未明确授权的本地改动；不把真实 Excel、日志和密钥纳入 Git。
+
+## Python 代码与验证
+
+- 目标运行环境为 Python 3.11；新增公共类和函数应有准确类型标注与简短 docstring。
+- 保持分层：`config` 不依赖 `clients`；`clients` 不依赖监听器；`feishu_bot_listener.py` 只编排消息、下载和回复。
+- 使用 `requests.Session`、既有异常类型与 token 脱敏机制，不在日志中输出 App Secret、完整 token 或附件内容。
+- 修改后运行 `.venv\Scripts\python.exe -m pytest`；若无法运行，说明执行过的命令、失败原因和未验证的风险。
+- 避免与当前需求无关的依赖升级、重构、格式化或接口变化。

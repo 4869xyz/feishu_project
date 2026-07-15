@@ -3,6 +3,9 @@
 .env.*
 !.env.example
 
+# Local mentor reference; project rules are derived into tracked documentation
+v2 任何程序项目规范使用Cursor的流程.md
+
 # Project-local Python runtime and dependencies
 .python/
 .venv/
@@ -18,8 +21,11 @@ htmlcov/
 
 # Runtime logs and downloaded attachments
 logs/*.log
+logs/*.lock
 data/inbox/*
 !data/inbox/.gitkeep
+data/archive/*
+!data/archive/.gitkeep
 
 # Editors and operating systems
 .idea/

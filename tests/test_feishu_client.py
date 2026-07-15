@@ -13,8 +13,10 @@ import requests
 from clients.feishu_client import (
     FeishuAuthenticationError,
     FeishuClient,
+    FeishuDocumentExportError,
     FeishuFileDownloadError,
     FeishuNetworkError,
+    FeishuPermissionError,
     mask_token,
 )
 from config.settings import Settings
@@ -79,6 +81,7 @@ def _settings(project_tmp_dir: Path) -> Settings:
         app_secret=TEST_SECRET,
         log_dir=project_tmp_dir / "logs",
         inbox_dir=project_tmp_dir / "data" / "inbox",
+        archive_dir=project_tmp_dir / "data" / "archive",
         max_download_bytes=1024,
         log_level="INFO",
     )
@@ -391,3 +394,114 @@ def test_retry_logs_do_not_expose_credentials(
 
     assert TEST_SECRET not in caplog.text
     assert token not in caplog.text
+
+
+def test_get_wiki_node_uses_authenticated_node_endpoint(project_tmp_dir: Path) -> None:
+    """Wiki node lookup sends the node token as a query parameter, not an export token."""
+
+    session = Mock(spec=requests.Session)
+    session.request.side_effect = [
+        FakeResponse({"code": 0, "tenant_access_token": "t-wiki", "expire": 7200}),
+        FakeResponse(
+            {
+                "code": 0,
+                "data": {
+                    "node": {
+                        "obj_type": "bitable",
+                        "obj_token": "app_real_table",
+                        "title": "销售数据",
+                    }
+                },
+            }
+        ),
+    ]
+    client = _client(project_tmp_dir, session)
+
+    node = client.get_wiki_node("wiki_node_001")
+
+    assert node.obj_type == "bitable"
+    assert node.obj_token == "app_real_table"
+    assert node.title == "销售数据"
+    request = session.request.call_args_list[1].kwargs
+    assert request["method"] == "GET"
+    assert request["url"].endswith("/wiki/v2/spaces/get_node")
+    assert request["params"] == {"token": "wiki_node_001"}
+    assert request["headers"]["Authorization"] == "Bearer t-wiki"
+
+
+def test_create_export_task_uses_required_xlsx_payload(project_tmp_dir: Path) -> None:
+    """Both sheet and bitable exports use the documented task body shape."""
+
+    session = Mock(spec=requests.Session)
+    session.request.side_effect = [
+        FakeResponse({"code": 0, "tenant_access_token": "t-export", "expire": 7200}),
+        FakeResponse({"code": 0, "data": {"ticket": "ticket_001"}}),
+    ]
+    client = _client(project_tmp_dir, session)
+
+    assert client.create_export_task("app_real_table", "bitable") == "ticket_001"
+
+    request = session.request.call_args_list[1].kwargs
+    assert request["method"] == "POST"
+    assert request["url"].endswith("/drive/v1/export_tasks")
+    assert request["json"] == {
+        "file_extension": "xlsx",
+        "token": "app_real_table",
+        "type": "bitable",
+    }
+
+
+def test_completed_export_task_returns_file_metadata(project_tmp_dir: Path) -> None:
+    """A completed export result supplies the generated filename and file token."""
+
+    session = Mock(spec=requests.Session)
+    session.request.side_effect = [
+        FakeResponse({"code": 0, "tenant_access_token": "t-export", "expire": 7200}),
+        FakeResponse(
+            {
+                "code": 0,
+                "data": {
+                    "result": {
+                        "job_status": 0,
+                        "file_name": "销售总表.xlsx",
+                        "file_token": "file_exported",
+                    }
+                },
+            }
+        ),
+    ]
+    client = _client(project_tmp_dir, session)
+
+    result = client.wait_for_export_task("ticket_001", "sht_real_token")
+
+    assert result.file_name == "销售总表.xlsx"
+    assert result.file_token == "file_exported"
+    request = session.request.call_args_list[1].kwargs
+    assert request["url"].endswith("/drive/v1/export_tasks/ticket_001")
+    assert request["params"] == {"token": "sht_real_token"}
+
+
+def test_wiki_permission_response_uses_permission_error(project_tmp_dir: Path) -> None:
+    """A node endpoint 403 is distinguishable from ordinary API failures."""
+
+    session = Mock(spec=requests.Session)
+    session.request.side_effect = [
+        FakeResponse({"code": 0, "tenant_access_token": "t-wiki", "expire": 7200}),
+        FakeResponse({"code": 99991672, "msg": "permission denied"}, status_code=403),
+    ]
+    client = _client(project_tmp_dir, session)
+
+    with pytest.raises(FeishuPermissionError):
+        client.get_wiki_node("wiki_node_001")
+
+
+def test_non_exportable_type_is_rejected_before_request(project_tmp_dir: Path) -> None:
+    """Only the two documented export types can reach the export API."""
+
+    session = Mock(spec=requests.Session)
+    client = _client(project_tmp_dir, session)
+
+    with pytest.raises(ValueError, match="document_type"):
+        client.create_export_task("doc_token", "docx")
+
+    assert session.request.call_count == 0

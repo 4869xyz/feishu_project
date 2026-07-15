@@ -1,0 +1,10 @@
+# Legacy Cursor compatibility entry
+
+本文件为旧版 Cursor 保留；完整且唯一的详细规范以
+`.cursor/rules/project-workflow.mdc` 为准。
+
+1. 开始任务先读取 `ARCHITECTURE.md` 和受影响目录的 README。
+2. Plan 模式先在 `docs/plans/` 维护原子化计划；用户未明确要求执行前不得修改业务代码。
+3. Agent 模式按已确认计划执行，并同步更新计划状态、受影响 README、`ARCHITECTURE.md` 与 `VersionLog.md`。
+4. 不记录或提交 `.env`、访问令牌、日志、真实附件；不覆盖用户已有改动。
+5. Python 改动保持类型标注和 docstring，并使用 `.venv\Scripts\python.exe -m pytest` 验证。

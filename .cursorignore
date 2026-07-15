@@ -1,0 +1,32 @@
+# Credentials and private local references
+.env
+.env.*
+!.env.example
+v2 任何程序项目规范使用Cursor的流程.md
+
+# Project-local Python runtimes and dependency caches
+.python/
+.venv/
+.uv-cache/
+
+# Generated Python and test artifacts
+__pycache__/
+*.py[cod]
+.pytest_cache/
+tests_runtime/
+.coverage
+htmlcov/
+
+# Runtime data; keep source code and documentation available to Cursor
+logs/
+data/inbox/*
+data/archive/*
+
+# Completed plans are archived but not indexed globally; active plans stay visible.
+docs/plans/archive/
+
+# Editor and operating-system metadata
+.idea/
+.vscode/
+.DS_Store
+Thumbs.db
