@@ -66,6 +66,19 @@ def _make_source(
     workbook.save(path)
 
 
+def _source_row(*, group=None, sequence=None, person=None, note=None, months=()) -> list:
+    """Return one A:T source row with selected test values."""
+
+    values = [None] * 20
+    values[0] = group
+    values[1] = sequence
+    values[2] = person
+    values[7] = note
+    for index, value in enumerate(months):
+        values[8 + index] = value
+    return values
+
+
 def _make_candidate_source(path: Path, sheet_names: list[str]) -> None:
     workbook = Workbook()
     workbook.remove(workbook.active)
@@ -284,13 +297,138 @@ def test_invalid_amount_reports_selected_sheet_row_and_column(
         validate_source_workbook(SourceWorkbook("source", source))
 
 
+def test_blank_person_summary_and_note_rows_are_ignored(
+    project_tmp_dir: Path,
+) -> None:
+    """Summary values and annotations never enter signing validation or totals."""
+
+    template = project_tmp_dir / "template.xlsx"
+    source = project_tmp_dir / "source-with-summary.xlsx"
+    output = project_tmp_dir / "output.xlsx"
+    _make_template(template)
+    rows = [
+        _source_row(group="甲组", sequence=1, person="A", months=(10,)),
+        _source_row(sequence="个人月度合计：", months=(10, " - ")),
+        _source_row(sequence="个人季度合计：", months=(10,)),
+        _source_row(sequence="个人年度合计：", months=(10,)),
+        _source_row(sequence="有修改的请用别的颜色填充", note="说明", months=(" - ",)),
+        _source_row(sequence=None, person="A", months=(None, 5)),
+        _source_row(sequence=99, person=None, note="漏填人员", months=(999,)),
+    ]
+    _make_source(source, rows, signing_sheet_name="签约情况")
+    workbook = load_workbook(source)
+    sheet = workbook["签约情况"]
+    for row in range(5, 8):
+        sheet.merge_cells(start_row=row, start_column=2, end_row=row, end_column=8)
+    workbook.save(source)
+    workbook.close()
+
+    validation = validate_source_workbook(SourceWorkbook("source", source))
+    result = aggregate_sales_workbooks(
+        [SourceWorkbook("source", source)], template, output
+    )
+
+    assert validation.signing_detail_count == 2
+    assert result.signing_detail_count == 2
+    assert result.signing_total == Decimal(15)
+
+
+def test_all_summary_labels_do_not_replace_inherited_group(
+    project_tmp_dir: Path,
+) -> None:
+    """All nine summary labels are skipped before they can alter group inheritance."""
+
+    template = project_tmp_dir / "template.xlsx"
+    source = project_tmp_dir / "all-summary-labels.xlsx"
+    output = project_tmp_dir / "output.xlsx"
+    _make_template(template)
+    labels = (
+        "个人月度合计",
+        "个人季度合计：",
+        "个人年度合计",
+        "小组月度合计：",
+        "小组季度合计",
+        "小组年度合计：",
+        "部门月度合计",
+        "部门季度合计：",
+        "部门年度合计",
+    )
+    rows = [_source_row(group="甲组", sequence=1, person="A", months=(1,))]
+    for label in labels[:6]:
+        rows.append(_source_row(sequence=label, months=(" - ",)))
+    for label in labels[6:]:
+        rows.append(_source_row(group=label, months=(" - ",)))
+    rows.append(_source_row(sequence=2, person="B", months=(2,)))
+    _make_source(source, rows, signing_sheet_name="签约数据")
+
+    result = aggregate_sales_workbooks(
+        [SourceWorkbook("source", source)], template, output
+    )
+
+    assert result.signing_detail_count == 2
+    assert result.signing_total == Decimal(3)
+    workbook = load_workbook(output, data_only=False)
+    signing = workbook[SIGNING_TARGET]
+    assert signing["A4"].value == "甲组"
+    vertical_group_merges = [
+        merged
+        for merged in signing.merged_cells.ranges
+        if merged.min_col == merged.max_col == 1 and merged.min_row >= 4
+    ]
+    assert len(vertical_group_merges) == 1
+    workbook.close()
+
+
+def test_group_only_row_sets_group_for_following_detail(project_tmp_dir: Path) -> None:
+    """An A-only group header remains meaningful even though its person is blank."""
+
+    source = project_tmp_dir / "group-header.xlsx"
+    _make_source(
+        source,
+        [
+            _source_row(group="甲组"),
+            _source_row(sequence=1, person="A", months=(1,)),
+        ],
+        signing_sheet_name="Sheet1",
+    )
+
+    validation = validate_source_workbook(SourceWorkbook("source", source))
+
+    assert validation.signing_detail_count == 1
+
+
+@pytest.mark.parametrize("person", [123, True])
+def test_non_text_non_blank_person_is_rejected(
+    project_tmp_dir: Path,
+    person,
+) -> None:
+    """Only blank personnel cells are ignored; malformed nonblank values still fail."""
+
+    source = project_tmp_dir / f"invalid-person-{person}.xlsx"
+    _make_source(
+        source,
+        [_source_row(group="甲组", sequence=1, person=person, months=(1,))],
+        signing_sheet_name="Sheet1",
+    )
+
+    with pytest.raises(SourceValidationError, match="第 4 行.*C 列.*人员必须是文本"):
+        validate_source_workbook(SourceWorkbook("source", source))
+
+
 def test_empty_signing_data_is_rejected_during_aggregation(
     project_tmp_dir: Path,
 ) -> None:
     template = project_tmp_dir / "template.xlsx"
     source = project_tmp_dir / "empty.xlsx"
     _make_template(template)
-    _make_source(source, [], signing_sheet_name="Sheet1")
+    _make_source(
+        source,
+        [
+            _source_row(sequence="个人月度合计：", months=(" - ",)),
+            _source_row(sequence="仅供说明", note="没有业务明细"),
+        ],
+        signing_sheet_name="Sheet1",
+    )
 
     with pytest.raises(SalesAggregationError, match="没有有效签约明细"):
         aggregate_sales_workbooks(

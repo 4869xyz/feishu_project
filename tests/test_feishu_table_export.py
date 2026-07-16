@@ -11,6 +11,7 @@ import pytest
 
 from clients.feishu_client import ExportTaskResult, FeishuPermissionError, WikiNode
 from clients.feishu_table_export import (
+    FeishuTableLink,
     FeishuTableLinkExporter,
     UnsupportedFeishuTableLink,
     WikiTablePermissionError,
@@ -127,6 +128,36 @@ def test_sheet_link_exports_using_its_own_token_and_archive_convention(
     ).resolve()
     assert result.path.read_bytes() == b"xlsx-bytes"
     assert client.calls[0] == ("create", "sht_sales_001", "sheet")
+
+
+def test_parsed_link_can_refresh_a_caller_owned_latest_path(
+    project_tmp_dir: Path,
+) -> None:
+    """Registered sources reuse export logic without message-specific archives."""
+
+    client = StubTableClient()
+    exporter = FeishuTableLinkExporter(
+        client,
+        project_tmp_dir / "archive",
+        max_bytes=1024,
+    )
+    destination = project_tmp_dir / "registered" / "latest.xlsx"
+
+    result = exporter.export_link_to_path(
+        FeishuTableLink(
+            kind="sheets",
+            token="sht_registered",
+            url="https://example.feishu.cn/sheets/sht_registered",
+        ),
+        destination,
+        source_file_id="cloud-stable",
+    )
+
+    assert result.path == destination.resolve()
+    assert result.source_file_id == "cloud-stable"
+    assert result.title == "导出任务文件"
+    assert destination.read_bytes() == b"xlsx-bytes"
+    assert client.calls[0] == ("create", "sht_registered", "sheet")
 
 
 @pytest.mark.parametrize("obj_type", ["sheet", "bitable"])

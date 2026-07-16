@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 from contextlib import contextmanager
+from datetime import datetime
 import logging
 import os
 from pathlib import Path
@@ -18,14 +19,20 @@ from clients.feishu_attachment import (
 )
 from clients.feishu_client import FeishuClient, FeishuClientError
 from clients.feishu_table_export import (
+    DownloadedTableExport,
+    FeishuTableLink,
     FeishuTableLinkExporter,
     UnsupportedFeishuTableLink,
     WikiTablePermissionError,
+    extract_feishu_table_link,
     message_sender_open_id,
     message_texts,
 )
 from config.settings import ConfigurationError, Settings, load_settings
-from services.aggregation_batch_store import AggregationBatchStore
+from services.aggregation_batch_store import (
+    AggregationBatchStore,
+    RegisteredCloudSource,
+)
 from services.download_cache import DownloadCacheCleaner
 from services.sales_workbook_aggregator import (
     SalesAggregationError,
@@ -51,6 +58,10 @@ BOT_COMMANDS = AGGREGATION_COMMANDS | {CACHE_CLEANUP_COMMAND}
 
 class SingleInstanceError(RuntimeError):
     """Raised when another listener already owns the runtime lock."""
+
+
+class RegisteredSourceRefreshError(RuntimeError):
+    """Raised when one persistent cloud source cannot provide a fresh workbook."""
 
 
 class CredentialSafeFormatter(logging.Formatter):
@@ -202,12 +213,20 @@ async def _reply_file(channel: FeishuChannel, message: Any, path: Path) -> bool:
         return False
 
 
+def _clean_message_texts(message: object) -> list[str]:
+    """Return message texts after removing group mention markup."""
+
+    cleaned_texts: list[str] = []
+    for text in message_texts(message):
+        cleaned = re.sub(r"<at\b[^>]*>.*?</at>", " ", text, flags=re.IGNORECASE)
+        cleaned_texts.append(cleaned.strip())
+    return cleaned_texts
+
+
 def _bot_command(message: object) -> str | None:
     """Recognize an exact supported command after removing mention markup."""
 
-    for text in message_texts(message):
-        cleaned = re.sub(r"<at\b[^>]*>.*?</at>", " ", text, flags=re.IGNORECASE)
-        cleaned = cleaned.strip()
+    for cleaned in _clean_message_texts(message):
         if cleaned in BOT_COMMANDS:
             return cleaned
         parts = cleaned.split()
@@ -215,6 +234,21 @@ def _bot_command(message: object) -> str | None:
             part.startswith("@") or part.startswith("_user_") for part in parts[:-1]
         ):
             return parts[-1]
+    return None
+
+
+def _registered_source_command(message: object) -> tuple[str, str] | None:
+    """Recognize fixed cloud-source commands and their optional argument."""
+
+    for cleaned in _clean_message_texts(message):
+        if cleaned == "云表列表":
+            return "list", ""
+        add_match = re.fullmatch(r"添加云表(?:\s+|[:：])?(.*)", cleaned)
+        if add_match:
+            return "add", add_match.group(1).strip()
+        remove_match = re.fullmatch(r"移除云表(?:\s+|[:：])?(.*)", cleaned)
+        if remove_match:
+            return "remove", remove_match.group(1).strip()
     return None
 
 
@@ -236,6 +270,178 @@ def _format_file_size(size: int) -> str:
             return f"{int(value)} {unit}" if unit == "B" else f"{value:.2f} {unit}"
         value /= 1024
     return f"{size} B"
+
+
+def _refresh_cloud_source_sync(
+    table_exporter: FeishuTableLinkExporter,
+    batch_store: AggregationBatchStore,
+    chat_id: str,
+    sender_open_id: str,
+    *,
+    link: FeishuTableLink,
+    source_id: str,
+) -> tuple[DownloadedTableExport, Path]:
+    """Export, validate, and atomically promote one cloud source cache."""
+
+    staging_path = batch_store.registered_staging_path(
+        chat_id, sender_open_id, link.kind, link.token
+    )
+    latest_path = batch_store.registered_cache_path(
+        chat_id, sender_open_id, link.kind, link.token
+    )
+    try:
+        exported = table_exporter.export_link_to_path(
+            link,
+            staging_path,
+            source_file_id=source_id,
+        )
+        validate_source_workbook(SourceWorkbook(source_id, staging_path))
+        batch_store.promote_registered_cache(staging_path, latest_path)
+        return exported, latest_path
+    finally:
+        staging_path.unlink(missing_ok=True)
+
+
+def _registered_sources_text(
+    sources: tuple[RegisteredCloudSource, ...],
+) -> str:
+    """Format persistent sources for a compact user-facing list."""
+
+    return "\n".join(
+        f"{index}. {item.source_id}｜{item.display_name}｜最近刷新 {item.last_success_at}"
+        for index, item in enumerate(sources, 1)
+    )
+
+
+def _refresh_error(source: RegisteredCloudSource, exc: Exception) -> str:
+    """Return a bounded source-specific refresh failure explanation."""
+
+    prefix = f"{source.display_name}（{source.source_id}）"
+    if isinstance(exc, WikiTablePermissionError):
+        return f"{prefix}：机器人已失去 Wiki 节点或导出权限"
+    if isinstance(exc, UnsupportedFeishuTableLink):
+        return f"{prefix}：Wiki 节点已不再指向可导出的电子表格或多维表格"
+    if isinstance(exc, FeishuClientError):
+        return f"{prefix}：飞书导出或下载失败，请稍后重试"
+    return f"{prefix}：{exc}"
+
+
+async def _handle_registered_source_command(
+    channel: FeishuChannel,
+    message: Any,
+    action: str,
+    argument: str,
+    download_lock: asyncio.Lock,
+    batch_store: AggregationBatchStore,
+    table_exporter: FeishuTableLinkExporter,
+) -> None:
+    """Register, list, or remove one sender's persistent cloud sources."""
+
+    chat_id, sender_open_id = _batch_identity(message)
+    async with download_lock:
+        registered = batch_store.list_registered_sources(chat_id, sender_open_id)
+        if action == "list":
+            if not registered:
+                await _reply(
+                    channel,
+                    message,
+                    "当前没有固定云表。发送“添加云表 <飞书表格链接>”即可登记。",
+                )
+                return
+            await _reply(
+                channel,
+                message,
+                f"当前共登记 {len(registered)} 份固定云表：\n"
+                f"{_registered_sources_text(registered)}",
+            )
+            return
+
+        if action == "remove":
+            if not argument:
+                await _reply(
+                    channel,
+                    message,
+                    "请发送“移除云表 <编号>”，编号可通过“云表列表”查看。",
+                )
+                return
+            removed = batch_store.remove_registered_source(
+                chat_id, sender_open_id, argument
+            )
+            if removed is None:
+                await _reply(
+                    channel,
+                    message,
+                    f"未找到固定云表：{argument}。请先发送“云表列表”核对编号。",
+                )
+                return
+            cache_path = batch_store.registered_cache_path(
+                chat_id,
+                sender_open_id,
+                removed.kind,
+                removed.token,
+            )
+            try:
+                cache_path.unlink(missing_ok=True)
+            except OSError:
+                LOGGER.warning(
+                    "固定云表登记已移除但缓存删除失败：source_id=%s",
+                    removed.source_id,
+                )
+            await _reply(
+                channel,
+                message,
+                f"已移除固定云表：{removed.display_name}（{removed.source_id}）。",
+            )
+            return
+
+        link = extract_feishu_table_link(message)
+        if action != "add" or link is None:
+            await _reply(
+                channel,
+                message,
+                "请发送“添加云表 <飞书 Sheets/Wiki 表格链接>”。",
+            )
+            return
+        source_id = batch_store.registered_source_id(link.kind, link.token)
+        duplicate = next(
+            (item for item in registered if item.source_id == source_id),
+            None,
+        )
+        if duplicate is not None:
+            await _reply(
+                channel,
+                message,
+                f"该云表已经登记：{duplicate.display_name}（{duplicate.source_id}）。",
+            )
+            return
+
+        exported, latest_path = await asyncio.to_thread(
+            _refresh_cloud_source_sync,
+            table_exporter,
+            batch_store,
+            chat_id,
+            sender_open_id,
+            link=link,
+            source_id=source_id,
+        )
+        refreshed_at = datetime.now().isoformat(timespec="seconds")
+        result = batch_store.add_registered_source(
+            chat_id,
+            sender_open_id,
+            kind=link.kind,
+            token=link.token,
+            url=link.url,
+            display_name=exported.title,
+            cached_path=latest_path,
+            refreshed_at=refreshed_at,
+        )
+        await _reply(
+            channel,
+            message,
+            f"固定云表已登记（共 {result.registered_count} 份）："
+            f"{result.source.display_name}（{result.source.source_id}）。"
+            "以后发送“汇总”时会先重新获取最新数据。",
+        )
 
 
 async def _handle_cache_cleanup_command(
@@ -280,6 +486,49 @@ async def _handle_cache_cleanup_command(
     await _reply(channel, message, reply)
 
 
+async def _refresh_registered_workbooks(
+    table_exporter: FeishuTableLinkExporter,
+    batch_store: AggregationBatchStore,
+    chat_id: str,
+    sender_open_id: str,
+    registered: tuple[RegisteredCloudSource, ...],
+) -> tuple[SourceWorkbook, ...]:
+    """Refresh registered sources sequentially and return their latest workbooks."""
+
+    refreshed: list[SourceWorkbook] = []
+    for item in registered:
+        link = FeishuTableLink(kind=item.kind, token=item.token, url=item.url)
+        try:
+            exported, latest_path = await asyncio.to_thread(
+                _refresh_cloud_source_sync,
+                table_exporter,
+                batch_store,
+                chat_id,
+                sender_open_id,
+                link=link,
+                source_id=item.source_id,
+            )
+        except (
+            FeishuClientError,
+            OSError,
+            SalesAggregationError,
+            UnsupportedFeishuTableLink,
+            ValueError,
+            WikiTablePermissionError,
+        ) as exc:
+            raise RegisteredSourceRefreshError(_refresh_error(item, exc)) from exc
+        batch_store.update_registered_source(
+            chat_id,
+            sender_open_id,
+            item.source_id,
+            display_name=exported.title,
+            cached_path=latest_path,
+            refreshed_at=datetime.now().isoformat(timespec="seconds"),
+        )
+        refreshed.append(SourceWorkbook(item.source_id, latest_path))
+    return tuple(refreshed)
+
+
 async def _handle_aggregation_command(
     channel: FeishuChannel,
     message: Any,
@@ -287,38 +536,93 @@ async def _handle_aggregation_command(
     download_lock: asyncio.Lock,
     batch_store: AggregationBatchStore,
     sales_template_path: Path,
+    table_exporter: FeishuTableLinkExporter,
 ) -> None:
     """Handle status, clear, and final aggregation commands."""
 
     chat_id, sender_open_id = _batch_identity(message)
     async with download_lock:
         batch = batch_store.list_sources(chat_id, sender_open_id)
+        registered = batch_store.list_registered_sources(chat_id, sender_open_id)
         if command == "汇总状态":
-            if not batch:
+            if not batch and not registered:
                 await _reply(channel, message, "当前汇总批次为空。请先上传销售 XLSX 文件。")
                 return
-            names = "\n".join(
+            temporary_names = "\n".join(
                 f"{index}. {item.display_name}" for index, item in enumerate(batch, 1)
             )
+            sections: list[str] = []
+            if registered:
+                sections.append(
+                    f"固定云表 {len(registered)} 份：\n"
+                    f"{_registered_sources_text(registered)}"
+                )
+            if batch:
+                sections.append(
+                    f"临时文件 {len(batch)} 份：\n{temporary_names}"
+                )
             await _reply(
                 channel,
                 message,
-                f"当前汇总批次共 {len(batch)} 份文件，处理顺序如下：\n{names}",
+                "当前汇总来源如下（固定云表优先）：\n\n"
+                + "\n\n".join(sections),
             )
             return
         if command == "清空汇总":
             removed = batch_store.clear_active(chat_id, sender_open_id)
-            await _reply(channel, message, f"已清空当前汇总批次，共移除 {removed} 份文件。")
+            suffix = (
+                f"固定云表 {len(registered)} 份仍保留。"
+                if registered
+                else "当前没有固定云表。"
+            )
+            await _reply(
+                channel,
+                message,
+                f"已清空临时汇总批次，共移除 {removed} 份文件；{suffix}",
+            )
             return
-        if not batch:
-            await _reply(channel, message, "当前汇总批次为空。请先上传销售 XLSX 文件。")
+        if not batch and not registered:
+            await _reply(
+                channel,
+                message,
+                "当前没有可汇总来源。请先上传销售 XLSX，或发送“添加云表 <链接>”。",
+            )
             return
 
+        registered_workbooks: tuple[SourceWorkbook, ...] = ()
+        if registered:
+            await _reply(
+                channel,
+                message,
+                f"正在按登记顺序刷新 {len(registered)} 份固定云表，请稍候。",
+            )
+            try:
+                registered_workbooks = await _refresh_registered_workbooks(
+                    table_exporter,
+                    batch_store,
+                    chat_id,
+                    sender_open_id,
+                    registered,
+                )
+            except RegisteredSourceRefreshError as exc:
+                LOGGER.warning(
+                    "固定云表刷新失败：message_id=%s, error=%s",
+                    getattr(message, "message_id", "unknown"),
+                    exc,
+                )
+                await _reply(
+                    channel,
+                    message,
+                    f"汇总已中止，未使用旧缓存：{exc}。固定云表和临时批次均已保留。",
+                )
+                return
+
+        sources = [*registered_workbooks, *(item.source for item in batch)]
         output_path = batch_store.new_output_path(chat_id, sender_open_id)
         try:
             result = await asyncio.to_thread(
                 aggregate_sales_workbooks,
-                [item.source for item in batch],
+                sources,
                 sales_template_path,
                 output_path,
             )
@@ -328,7 +632,11 @@ async def _handle_aggregation_command(
                 getattr(message, "message_id", "unknown"),
                 exc,
             )
-            await _reply(channel, message, f"汇总失败，当前批次已保留：{exc}")
+            await _reply(
+                channel,
+                message,
+                f"汇总失败，固定云表和临时批次均已保留：{exc}",
+            )
             return
 
         if not await _reply_file(channel, message, result.output_path):
@@ -361,6 +669,43 @@ async def handle_message(
     cache_admin_open_ids: tuple[str, ...] = (),
 ) -> None:
     """Handle one direct Excel attachment or supported Feishu table link."""
+
+    registered_command = _registered_source_command(message)
+    if registered_command is not None:
+        if batch_store is None:
+            await _reply(channel, message, "固定云表命令当前不可用。")
+            return
+        action, argument = registered_command
+        try:
+            await _handle_registered_source_command(
+                channel,
+                message,
+                action,
+                argument,
+                download_lock,
+                batch_store,
+                table_exporter,
+            )
+        except WikiTablePermissionError:
+            await _reply(channel, message, WIKI_PERMISSION_REPLY)
+        except UnsupportedFeishuTableLink:
+            await _reply(channel, message, "当前链接不是可导出的销售表格。")
+        except FeishuClientError:
+            LOGGER.warning(
+                "固定云表登记导出失败：message_id=%s",
+                getattr(message, "message_id", "unknown"),
+            )
+            await _reply(channel, message, "固定云表导出失败，请稍后重新登记。")
+        except SalesAggregationError as exc:
+            await _reply(channel, message, f"固定云表未登记：{exc}")
+        except (OSError, ValueError, RuntimeError) as exc:
+            LOGGER.warning(
+                "固定云表命令失败：message_id=%s, error=%s",
+                getattr(message, "message_id", "unknown"),
+                exc,
+            )
+            await _reply(channel, message, f"固定云表命令失败：{exc}")
+        return
 
     command = _bot_command(message)
     if command == CACHE_CLEANUP_COMMAND:
@@ -395,6 +740,7 @@ async def handle_message(
                     download_lock,
                     batch_store,
                     sales_template_path,
+                    table_exporter,
                 )
             except (OSError, ValueError, RuntimeError) as exc:
                 LOGGER.warning(

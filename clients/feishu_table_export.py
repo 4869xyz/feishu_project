@@ -227,12 +227,10 @@ class FeishuTableLinkExporter:
         self.max_bytes = max_bytes
         self._now = now
 
-    def export_from_message(self, message: object) -> DownloadedTableExport | None:
-        """Export the first supported text link, or return ``None`` for other messages."""
-
-        link = extract_feishu_table_link(message)
-        if link is None:
-            return None
+    def _prepare_export(
+        self, link: FeishuTableLink
+    ) -> tuple[str, str, str, ExportTaskResult]:
+        """Resolve one link and wait until its XLSX export is ready."""
 
         document_type = "sheet"
         document_token = link.token
@@ -257,6 +255,57 @@ class FeishuTableLinkExporter:
             raise
 
         title = _safe_document_title(wiki_title or task_result.file_name)
+        return document_type, document_token, title, task_result
+
+    def _download_ready_export(
+        self,
+        link: FeishuTableLink,
+        task_result: ExportTaskResult,
+        destination: Path,
+    ) -> int:
+        """Download one ready export with the existing Wiki permission mapping."""
+
+        try:
+            return self.client.download_exported_file(
+                task_result.file_token,
+                destination,
+                max_bytes=self.max_bytes,
+            )
+        except FeishuPermissionError as exc:
+            if link.kind == "wiki":
+                raise WikiTablePermissionError from exc
+            raise
+
+    def export_link_to_path(
+        self,
+        link: FeishuTableLink,
+        destination: str | Path,
+        *,
+        source_file_id: str,
+    ) -> DownloadedTableExport:
+        """Export a previously parsed link to a caller-owned cache path."""
+
+        if not source_file_id.strip():
+            raise ValueError("source_file_id must not be empty")
+        document_type, _, title, task_result = self._prepare_export(link)
+        path = Path(destination).resolve()
+        bytes_written = self._download_ready_export(link, task_result, path)
+        return DownloadedTableExport(
+            path=path,
+            bytes_written=bytes_written,
+            document_type=document_type,
+            title=title,
+            source_file_id=source_file_id.strip(),
+        )
+
+    def export_from_message(self, message: object) -> DownloadedTableExport | None:
+        """Export the first supported text link, or return None for other messages."""
+
+        link = extract_feishu_table_link(message)
+        if link is None:
+            return None
+
+        document_type, document_token, title, task_result = self._prepare_export(link)
         timestamp = self._now()
         sender = _safe_component(
             _sender_open_id(message), fallback="unknown_sender", max_length=80
@@ -270,16 +319,7 @@ class FeishuTableLinkExporter:
             / sender
             / f"SUB-{timestamp:%Y%m%d-%H%M%S}-{message_suffix}_{title}.xlsx"
         )
-        try:
-            bytes_written = self.client.download_exported_file(
-                task_result.file_token,
-                destination,
-                max_bytes=self.max_bytes,
-            )
-        except FeishuPermissionError as exc:
-            if link.kind == "wiki":
-                raise WikiTablePermissionError from exc
-            raise
+        bytes_written = self._download_ready_export(link, task_result, destination)
 
         return DownloadedTableExport(
             path=destination,

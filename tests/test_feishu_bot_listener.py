@@ -11,7 +11,12 @@ from types import SimpleNamespace
 import pytest
 
 from clients.feishu_attachment import DownloadedAttachment
-from clients.feishu_table_export import WikiTablePermissionError
+from clients.feishu_client import FeishuClientError
+from clients.feishu_table_export import (
+    DownloadedTableExport,
+    FeishuTableLink,
+    WikiTablePermissionError,
+)
 from feishu_bot_listener import (
     CredentialSafeFormatter,
     SingleInstanceError,
@@ -42,6 +47,39 @@ class PermissionDeniedExporter:
 
     def export_from_message(self, message: object) -> None:
         raise WikiTablePermissionError
+
+
+class RefreshingTableExporter:
+    """Write deterministic latest files or raise a configured refresh error."""
+
+    def __init__(self, *, payload: bytes = b"fresh-xlsx") -> None:
+        self.payload = payload
+        self.error: Exception | None = None
+        self.calls: list[tuple[FeishuTableLink, Path, str]] = []
+
+    def export_from_message(self, message: object) -> None:
+        return None
+
+    def export_link_to_path(
+        self,
+        link: FeishuTableLink,
+        destination: str | Path,
+        *,
+        source_file_id: str,
+    ) -> DownloadedTableExport:
+        path = Path(destination)
+        self.calls.append((link, path, source_file_id))
+        if self.error is not None:
+            raise self.error
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_bytes(self.payload)
+        return DownloadedTableExport(
+            path=path,
+            bytes_written=len(self.payload),
+            document_type="sheet",
+            title="固定销售表",
+            source_file_id=source_file_id,
+        )
 
 
 class ReturningAttachmentDownloader:
@@ -244,6 +282,226 @@ def test_aggregation_command_returns_xlsx_and_clears_batch(
     assert "汇总完成" in channel.calls[1][1]["text"]
     assert "回款" not in channel.calls[1][1]["text"]
     assert store.list_sources("oc_chat", "ou_sender") == ()
+
+
+def test_registered_cloud_source_command_lifecycle(
+    project_tmp_dir: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A sender can add, list, and remove a validated persistent source."""
+
+    channel = RecordingChannel()
+    store = AggregationBatchStore(project_tmp_dir / "aggregation")
+    exporter = RefreshingTableExporter()
+    monkeypatch.setattr(
+        "feishu_bot_listener.validate_source_workbook",
+        lambda source: SourceValidationResult("签约情况", 4),
+    )
+    add_message = SimpleNamespace(
+        chat_id="oc_chat",
+        message_id="om_add",
+        sender_open_id="ou_sender",
+        content_text=(
+            "添加云表 https://example.feishu.cn/sheets/sht_registered?sheet=abc"
+        ),
+    )
+
+    asyncio.run(
+        handle_message(
+            channel,
+            StubAttachmentDownloader(),
+            exporter,
+            add_message,
+            asyncio.Lock(),
+            batch_store=store,
+            sales_template_path=project_tmp_dir / "template.xlsx",
+        )
+    )
+
+    registered = store.list_registered_sources("oc_chat", "ou_sender")
+    assert len(registered) == 1
+    assert registered[0].display_name == "固定销售表"
+    assert registered[0].cached_path.read_bytes() == b"fresh-xlsx"
+    assert "固定云表已登记" in channel.calls[-1][1]["text"]
+
+    list_message = SimpleNamespace(
+        chat_id="oc_chat",
+        message_id="om_list",
+        sender_open_id="ou_sender",
+        content_text="云表列表",
+    )
+    asyncio.run(
+        handle_message(
+            channel,
+            StubAttachmentDownloader(),
+            exporter,
+            list_message,
+            asyncio.Lock(),
+            batch_store=store,
+            sales_template_path=project_tmp_dir / "template.xlsx",
+        )
+    )
+    assert registered[0].source_id in channel.calls[-1][1]["text"]
+
+    remove_message = SimpleNamespace(
+        chat_id="oc_chat",
+        message_id="om_remove",
+        sender_open_id="ou_sender",
+        content_text=f"移除云表 {registered[0].source_id}",
+    )
+    asyncio.run(
+        handle_message(
+            channel,
+            StubAttachmentDownloader(),
+            exporter,
+            remove_message,
+            asyncio.Lock(),
+            batch_store=store,
+            sales_template_path=project_tmp_dir / "template.xlsx",
+        )
+    )
+    assert store.list_registered_sources("oc_chat", "ou_sender") == ()
+    assert registered[0].cached_path.exists() is False
+    assert "已移除固定云表" in channel.calls[-1][1]["text"]
+
+
+def test_aggregation_refreshes_registered_sources_before_temporary_files(
+    project_tmp_dir: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Fresh registered caches lead the source order and persist after success."""
+
+    channel = RecordingChannel()
+    store = AggregationBatchStore(project_tmp_dir / "aggregation")
+    latest = store.registered_cache_path(
+        "oc_chat", "ou_sender", "sheets", "sht_registered"
+    )
+    latest.parent.mkdir(parents=True, exist_ok=True)
+    latest.write_bytes(b"old-cache")
+    registered = store.add_registered_source(
+        "oc_chat",
+        "ou_sender",
+        kind="sheets",
+        token="sht_registered",
+        url="https://example.feishu.cn/sheets/sht_registered",
+        display_name="固定销售表",
+        cached_path=latest,
+        refreshed_at="2026-07-16T09:00:00",
+    ).source
+    temporary_path = project_tmp_dir / "temporary.xlsx"
+    temporary_path.write_bytes(b"temporary")
+    store.add_source(
+        "oc_chat",
+        "ou_sender",
+        SourceWorkbook("temporary-id", temporary_path),
+        display_name="临时销售.xlsx",
+    )
+    exporter = RefreshingTableExporter(payload=b"new-cache")
+    monkeypatch.setattr(
+        "feishu_bot_listener.validate_source_workbook",
+        lambda source: SourceValidationResult("签约情况", 3),
+    )
+    captured_ids: list[str] = []
+
+    def fake_aggregate(sources, template_path, output_path):
+        captured_ids.extend(source.source_file_id for source in sources)
+        Path(output_path).write_bytes(b"xlsx-result")
+        return AggregationResult(
+            output_path=Path(output_path),
+            source_count=len(sources),
+            signing_detail_count=5,
+            signing_total=Decimal(200),
+        )
+
+    monkeypatch.setattr("feishu_bot_listener.aggregate_sales_workbooks", fake_aggregate)
+    message = SimpleNamespace(
+        chat_id="oc_chat",
+        message_id="om_refresh",
+        sender_open_id="ou_sender",
+        content_text="汇总",
+    )
+
+    asyncio.run(
+        handle_message(
+            channel,
+            StubAttachmentDownloader(),
+            exporter,
+            message,
+            asyncio.Lock(),
+            batch_store=store,
+            sales_template_path=project_tmp_dir / "template.xlsx",
+        )
+    )
+
+    assert captured_ids == [registered.source_id, "temporary-id"]
+    assert latest.read_bytes() == b"new-cache"
+    assert len(store.list_registered_sources("oc_chat", "ou_sender")) == 1
+    assert store.list_sources("oc_chat", "ou_sender") == ()
+    assert "正在按登记顺序刷新 1 份固定云表" in channel.calls[0][1]["text"]
+    assert "file" in channel.calls[1][1]
+    assert "汇总完成" in channel.calls[2][1]["text"]
+
+
+def test_registered_refresh_failure_never_uses_old_cache(
+    project_tmp_dir: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A failed fresh export aborts aggregation and preserves the last cache."""
+
+    channel = RecordingChannel()
+    store = AggregationBatchStore(project_tmp_dir / "aggregation")
+    latest = store.registered_cache_path(
+        "oc_chat", "ou_sender", "sheets", "sht_registered"
+    )
+    latest.parent.mkdir(parents=True, exist_ok=True)
+    latest.write_bytes(b"last-good-cache")
+    store.add_registered_source(
+        "oc_chat",
+        "ou_sender",
+        kind="sheets",
+        token="sht_registered",
+        url="https://example.feishu.cn/sheets/sht_registered",
+        display_name="固定销售表",
+        cached_path=latest,
+        refreshed_at="2026-07-16T09:00:00",
+    )
+    exporter = RefreshingTableExporter()
+    exporter.error = FeishuClientError("network unavailable")
+    aggregate_called = False
+
+    def unexpected_aggregate(*args, **kwargs):
+        nonlocal aggregate_called
+        aggregate_called = True
+        raise AssertionError("stale cache must not be aggregated")
+
+    monkeypatch.setattr(
+        "feishu_bot_listener.aggregate_sales_workbooks",
+        unexpected_aggregate,
+    )
+    message = SimpleNamespace(
+        chat_id="oc_chat",
+        message_id="om_refresh_failed",
+        sender_open_id="ou_sender",
+        content_text="汇总",
+    )
+
+    asyncio.run(
+        handle_message(
+            channel,
+            StubAttachmentDownloader(),
+            exporter,
+            message,
+            asyncio.Lock(),
+            batch_store=store,
+            sales_template_path=project_tmp_dir / "template.xlsx",
+        )
+    )
+
+    assert aggregate_called is False
+    assert latest.read_bytes() == b"last-good-cache"
+    assert len(store.list_registered_sources("oc_chat", "ou_sender")) == 1
+    assert "未使用旧缓存" in channel.calls[-1][1]["text"]
+    assert all("file" not in content for _, content, _ in channel.calls)
 
 
 def test_aggregation_status_is_isolated_by_sender(project_tmp_dir: Path) -> None:

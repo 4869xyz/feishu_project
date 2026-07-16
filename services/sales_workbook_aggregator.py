@@ -34,6 +34,17 @@ SIGNING_GROUP_YEAR = "小组年度合计："
 SIGNING_DEPT_MONTH = "部门月度合计："
 SIGNING_DEPT_QUARTER = "部门季度合计："
 SIGNING_DEPT_YEAR = "部门年度合计："
+SIGNING_SUMMARY_LABELS = (
+    SIGNING_PERSON_MONTH,
+    SIGNING_PERSON_QUARTER,
+    SIGNING_PERSON_YEAR,
+    SIGNING_GROUP_MONTH,
+    SIGNING_GROUP_QUARTER,
+    SIGNING_GROUP_YEAR,
+    SIGNING_DEPT_MONTH,
+    SIGNING_DEPT_QUARTER,
+    SIGNING_DEPT_YEAR,
+)
 REPAYMENT_PERSON_TOTAL = "个人小计："
 REPAYMENT_DEPT_TOTAL = "部门总计："
 
@@ -159,6 +170,19 @@ def _is_blank(value: Any) -> bool:
     return value is None or (isinstance(value, str) and not value.strip())
 
 
+def _is_signing_summary_row(values: Sequence[Any]) -> bool:
+    """Return whether A:H contains one known signing summary label."""
+
+    summary_labels = {
+        _normalized_header(label).rstrip(":") for label in SIGNING_SUMMARY_LABELS
+    }
+    return any(
+        _normalized_header(value).rstrip(":") in summary_labels
+        for value in values[:8]
+        if not _is_blank(value)
+    )
+
+
 def _is_numeric(value: Any) -> bool:
     return isinstance(value, (int, float, Decimal)) and not isinstance(value, bool)
 
@@ -270,6 +294,9 @@ def _parse_signing(
     current_group: str | None = None
     for row in range(4, sheet.max_row + 1):
         values = tuple(sheet.cell(row, column).value for column in range(1, 21))
+        if _is_signing_summary_row(values):
+            continue
+
         group_value = values[0]
         if not _is_blank(group_value):
             if not isinstance(group_value, str):
@@ -282,7 +309,8 @@ def _parse_signing(
                 )
             current_group = group_value
 
-        if all(_is_blank(value) for value in values[1:]):
+        person = values[2]
+        if _is_blank(person):
             continue
         if current_group is None:
             raise _source_error(
@@ -292,11 +320,10 @@ def _parse_signing(
                 row=row,
                 column="A",
             )
-        person = values[2]
-        if _is_blank(person) or not isinstance(person, str):
+        if not isinstance(person, str):
             raise _source_error(
                 source,
-                "人员不能为空且必须是文本",
+                "人员必须是文本",
                 sheet=sheet_name,
                 row=row,
                 column="C",
