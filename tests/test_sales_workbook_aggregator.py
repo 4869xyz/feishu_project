@@ -7,7 +7,7 @@ from pathlib import Path
 
 import pytest
 from openpyxl import Workbook, load_workbook
-from openpyxl.styles import Font, PatternFill
+from openpyxl.styles import Color, Font, PatternFill
 
 from services.sales_workbook_aggregator import (
     DuplicateSourceError,
@@ -97,6 +97,23 @@ def _style_row(sheet, row: int, max_column: int, color: str) -> None:
         cell.fill = PatternFill("solid", fgColor=color)
         cell.font = Font(name="Microsoft YaHei", bold=row != 4)
     sheet.row_dimensions[row].height = 20 + row % 3
+
+
+def _font_color_signature(cell) -> tuple | None:
+    color = cell.font.color
+    if color is None:
+        return None
+    if color.type == "rgb":
+        value = color.rgb
+    elif color.type == "theme":
+        value = color.theme
+    elif color.type == "indexed":
+        value = color.indexed
+    elif color.type == "auto":
+        value = color.auto
+    else:
+        value = None
+    return color.type, value, color.tint
 
 
 def _make_template(path: Path, *, include_repayment: bool = True) -> None:
@@ -230,15 +247,26 @@ def test_aggregate_rebuilds_signing_and_preserves_repayment(
 
     workbook = load_workbook(output, data_only=False)
     signing = workbook[SIGNING_TARGET]
-    assert signing.max_row == 23
+    assert signing.max_row == 26
     assert signing["A4"].value == "甲组"
-    assert signing["A14"].value == "乙组"
+    assert signing["A15"].value == "乙组"
     assert signing["I7"].value == "=SUM(I4:I6)"
-    assert signing["I10"].value == "=SUM(I7)"
-    assert signing["I21"].value == "=SUM(I10,I18)"
-    assert "A4:A12" in {str(item) for item in signing.merged_cells.ranges}
-    assert "A14:A20" in {str(item) for item in signing.merged_cells.ranges}
-    assert all(not signing.row_dimensions[row].hidden for row in range(4, 24))
+    assert signing["I11"].value == "=SUM(I7)"
+    assert signing["I24"].value == "=SUM(I11,I20)"
+    assert "A4:A13" in {str(item) for item in signing.merged_cells.ranges}
+    assert "A15:A22" in {str(item) for item in signing.merged_cells.ranges}
+    assert all(not signing.row_dimensions[row].hidden for row in range(4, 27))
+    assert all(signing.cell(10, column).value is None for column in range(1, 21))
+    assert all(signing.cell(19, column).value is None for column in range(1, 21))
+    assert all(signing.cell(23, column).value is None for column in range(1, 21))
+
+    template_workbook = load_workbook(template, data_only=False)
+    template_signing = template_workbook[SIGNING_TARGET]
+    assert signing["B10"]._style == template_signing["B8"]._style
+    assert signing.row_dimensions[10].height == template_signing.row_dimensions[8].height
+    assert signing["B23"]._style == template_signing["B12"]._style
+    assert signing.row_dimensions[23].height == template_signing.row_dimensions[12].height
+    template_workbook.close()
 
     repayment = workbook[REPAYMENT_TARGET]
     assert repayment["A1"].value == "回款表必须原样保留"
@@ -413,6 +441,174 @@ def test_non_text_non_blank_person_is_rejected(
 
     with pytest.raises(SourceValidationError, match="第 4 行.*C 列.*人员必须是文本"):
         validate_source_workbook(SourceWorkbook("source", source))
+
+
+def test_detail_cells_preserve_source_font_colors_only(
+    project_tmp_dir: Path,
+) -> None:
+    """Each detail cell keeps its source color while all other styles stay templated."""
+
+    template = project_tmp_dir / "template.xlsx"
+    source1 = project_tmp_dir / "source-red.xlsx"
+    source2 = project_tmp_dir / "source-black.xlsx"
+    output = project_tmp_dir / "output.xlsx"
+    _make_template(template)
+    _make_source(
+        source1,
+        [
+            _source_row(group="甲组", sequence=1, person="同一人", months=(10,)),
+            _source_row(sequence="个人月度合计：", months=(10,)),
+        ],
+        signing_sheet_name="签约数据",
+    )
+    _make_source(
+        source2,
+        [_source_row(group="甲组", sequence=2, person="同一人", months=(20,))],
+        signing_sheet_name="签约数据",
+    )
+
+    workbook = load_workbook(template)
+    sheet = workbook[SIGNING_TARGET]
+    for column in range(1, 21):
+        sheet.cell(4, column).font = Font(
+            name="Microsoft YaHei",
+            size=11,
+            bold=False,
+            italic=False,
+            color=Color(rgb="FF7030A0"),
+        )
+        sheet.cell(5, column).font = Font(
+            name="Microsoft YaHei", size=12, bold=True, color=Color(rgb="FF0070C0")
+        )
+    sheet["I4"].number_format = "#,##0"
+    workbook.save(template)
+    workbook.close()
+
+    workbook = load_workbook(source1)
+    sheet = workbook["签约数据"]
+    sheet["A4"].font = Font(
+        name="Arial", size=22, bold=True, color=Color(rgb="FFC00000")
+    )
+    sheet["B4"].font = Font(
+        name="Arial", size=22, bold=True, color=Color(theme=4, tint=0.25)
+    )
+    sheet["C4"].font = Font(
+        name="Arial", size=22, bold=True, color=Color(rgb="FFFF0000")
+    )
+    sheet["D4"].font = Font(name="Arial", size=22, bold=True, color=Color(indexed=8))
+    sheet["E4"].font = Font(name="Arial", size=22, bold=True, color=Color(auto=True))
+    sheet["F4"].font = Font(name="Arial", size=22, bold=True)
+    sheet["I4"].font = Font(
+        name="Arial", size=22, bold=True, color=Color(rgb="FF373C43")
+    )
+    sheet["I4"].number_format = "0.00"
+    sheet["B5"].font = Font(color=Color(rgb="FF00B050"))
+    workbook.save(source1)
+    workbook.close()
+
+    workbook = load_workbook(source2)
+    sheet = workbook["签约数据"]
+    sheet["C4"].font = Font(
+        name="SimSun", size=18, bold=True, color=Color(rgb="FF000000")
+    )
+    workbook.save(source2)
+    workbook.close()
+
+    aggregate_sales_workbooks(
+        [SourceWorkbook("red", source1), SourceWorkbook("black", source2)],
+        template,
+        output,
+    )
+
+    output_workbook = load_workbook(output, data_only=False)
+    output_sheet = output_workbook[SIGNING_TARGET]
+    template_workbook = load_workbook(template, data_only=False)
+    template_sheet = template_workbook[SIGNING_TARGET]
+
+    assert _font_color_signature(output_sheet["A4"]) == ("rgb", "FFC00000", 0.0)
+    assert _font_color_signature(output_sheet["B4"]) == ("theme", 4, 0.25)
+    assert _font_color_signature(output_sheet["C4"]) == ("rgb", "FFFF0000", 0.0)
+    assert _font_color_signature(output_sheet["D4"]) == ("indexed", 8, 0.0)
+    assert _font_color_signature(output_sheet["E4"]) == ("auto", True, 0.0)
+    assert _font_color_signature(output_sheet["F4"]) is None
+    assert _font_color_signature(output_sheet["I4"]) == ("rgb", "FF373C43", 0.0)
+    assert _font_color_signature(output_sheet["C5"]) == ("rgb", "FF000000", 0.0)
+
+    assert output_sheet["C4"].font.name == template_sheet["C4"].font.name
+    assert output_sheet["C4"].font.sz == template_sheet["C4"].font.sz
+    assert output_sheet["C4"].font.bold == template_sheet["C4"].font.bold
+    assert output_sheet["C4"].font.italic == template_sheet["C4"].font.italic
+    assert output_sheet["C4"].fill.fill_type == template_sheet["C4"].fill.fill_type
+    assert output_sheet["C4"].fill.fgColor.rgb == template_sheet["C4"].fill.fgColor.rgb
+    assert (
+        output_sheet["C4"].alignment.horizontal
+        == template_sheet["C4"].alignment.horizontal
+    )
+    assert output_sheet["C4"].border.left.style == template_sheet["C4"].border.left.style
+    assert output_sheet["I4"].number_format == template_sheet["I4"].number_format
+
+    # The generated personal total uses the template sample, never the ignored source total.
+    assert _font_color_signature(output_sheet["B6"]) == ("rgb", "FF0070C0", 0.0)
+    output_workbook.close()
+    template_workbook.close()
+
+
+def test_inherited_group_keeps_group_header_font_color(project_tmp_dir: Path) -> None:
+    """A blank detail A cell inherits both the last group value and its font color."""
+
+    template = project_tmp_dir / "template.xlsx"
+    source = project_tmp_dir / "inherited-group-color.xlsx"
+    output = project_tmp_dir / "output.xlsx"
+    _make_template(template)
+    _make_source(
+        source,
+        [
+            _source_row(group="甲组"),
+            _source_row(sequence=1, person="A", months=(10,)),
+        ],
+        signing_sheet_name="签约情况",
+    )
+    workbook = load_workbook(source)
+    sheet = workbook["签约情况"]
+    sheet["A4"].font = Font(color=Color(rgb="FF00B050"))
+    sheet["A5"].font = Font(color=Color(rgb="FFFF0000"))
+    workbook.save(source)
+    workbook.close()
+
+    aggregate_sales_workbooks([SourceWorkbook("source", source)], template, output)
+
+    workbook = load_workbook(output, data_only=False)
+    assert _font_color_signature(workbook[SIGNING_TARGET]["A4"]) == (
+        "rgb",
+        "FF00B050",
+        0.0,
+    )
+    workbook.close()
+
+
+def test_repository_template_with_shared_strings_reopens(
+    project_tmp_dir: Path,
+) -> None:
+    """Preserved non-target worksheets keep their shared-string package dependency."""
+
+    template = (
+        Path(__file__).resolve().parents[1]
+        / "excel_file_example"
+        / "汇总效果-合并版-2026年销售数据统计2.xlsx"
+    )
+    source = project_tmp_dir / "shared-strings-source.xlsx"
+    output = project_tmp_dir / "shared-strings-output.xlsx"
+    _make_source(
+        source,
+        [_source_row(group="甲组", sequence=1, person="A", months=(10,))],
+        signing_sheet_name="签约情况",
+    )
+
+    aggregate_sales_workbooks([SourceWorkbook("source", source)], template, output)
+
+    workbook = load_workbook(output, data_only=False)
+    assert workbook[SIGNING_TARGET]["C4"].value == "A"
+    workbook.close()
 
 
 def test_empty_signing_data_is_rejected_during_aggregation(

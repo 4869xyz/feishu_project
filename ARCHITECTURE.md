@@ -12,7 +12,7 @@
 | `clients.feishu_client` | tenant token 缓存、飞书 HTTP 请求、Wiki 查询、导出任务和二进制下载。 | `config`、`requests`、标准库 |
 | `clients.feishu_attachment` | 解析文件消息、校验 Excel 后缀、生成收件箱安全文件名。 | 标准库、消息资源下载协议 |
 | `clients.feishu_table_export` | 识别表格链接、解析 Wiki 真实对象，并导出到消息归档或调用方指定的 latest 路径。 | `feishu_client` 的导出协议、标准库 |
-| `services.sales_workbook_aggregator` | 按名称优先级选择并校验签约工作表，重建签约目标表、校验控制总额并原子保存。 | `openpyxl`、标准库 |
+| `services.sales_workbook_aggregator` | 按名称优先级选择并校验签约工作表，重建签约目标表、保留明细源字体颜色、校验控制总额并原子保存。 | `openpyxl`、标准库 |
 | `services.aggregation_batch_store` | 按聊天和发送人持久化临时批次、固定云表、latest 缓存和输出路径，并迁移 v1 状态。 | 标准库 |
 | `services.download_cache` | 只在配置的缓存根目录内删除非活动文件，并保护活动批次和显式保护路径。 | 标准库 |
 | `feishu_bot_listener.py` | 配置消息准入、日志和单实例锁，创建长连接、串行编排并把结果或文件转换为飞书回复。 | `config`、`clients`、`services`、`lark-channel-sdk` |
@@ -72,6 +72,8 @@
 - 固定云表来源 ID 由原始链接类型和 Token 稳定生成；来源按“聊天 + 发送人”隔离，固定来源顺序先于临时来源。
 - 模板中只重建签约汇总表；回款表及其他工作表的 XML、关系、图片等部件原样保留，回款错误不得阻断签约。
 - 签约按来源顺序和首次出现顺序输出明细、个人、小组、部门统计，并使用独立的 `Decimal` 控制总额核对。
+- 业务明细 A:T 先应用模板完整样式，再仅覆盖为源单元格字体颜色；组别继承时同步继承组别颜色，汇总行始终使用模板颜色。
+- 最后一个个人汇总与小组汇总、最后一个小组汇总与部门汇总之间各使用模板空行样式分隔；人员间和组别间已有空行规则保持不变。
 - 输出先写临时文件，重开校验公式、隐藏行和目标表结构后再原子替换正式文件。
 
 ## 表格链接导出约束

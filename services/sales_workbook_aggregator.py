@@ -54,6 +54,7 @@ XML_DOC_REL_NS = (
     "http://schemas.openxmlformats.org/officeDocument/2006/relationships"
 )
 XML_MAIN_NS = "http://schemas.openxmlformats.org/spreadsheetml/2006/main"
+SHARED_STRINGS_REL_TYPE = f"{XML_DOC_REL_NS}/sharedStrings"
 
 
 class SalesAggregationError(RuntimeError):
@@ -110,6 +111,7 @@ class SigningRecord:
     group: str
     person: str
     values: tuple[Any, ...]
+    font_colors: tuple[Any, ...]
     months: tuple[Any, ...]
 
 
@@ -292,6 +294,7 @@ def _parse_signing(
 ) -> tuple[SigningRecord, ...]:
     records: list[SigningRecord] = []
     current_group: str | None = None
+    current_group_font_color: Any = None
     for row in range(4, sheet.max_row + 1):
         values = tuple(sheet.cell(row, column).value for column in range(1, 21))
         if _is_signing_summary_row(values):
@@ -308,6 +311,7 @@ def _parse_signing(
                     column="A",
                 )
             current_group = group_value
+            current_group_font_color = copy(sheet.cell(row, 1).font.color)
 
         person = values[2]
         if _is_blank(person):
@@ -339,6 +343,11 @@ def _parse_signing(
                     column=get_column_letter(offset),
                 )
         output_values = (current_group, *values[1:])
+        font_colors = [
+            copy(sheet.cell(row, column).font.color) for column in range(1, 21)
+        ]
+        if _is_blank(group_value):
+            font_colors[0] = copy(current_group_font_color)
         records.append(
             SigningRecord(
                 source_file_id=source.source_file_id,
@@ -347,6 +356,7 @@ def _parse_signing(
                 group=current_group,
                 person=person,
                 values=tuple(output_values),
+                font_colors=tuple(font_colors),
                 months=tuple(months),
             )
         )
@@ -440,6 +450,14 @@ def _apply_row_style(
     dimension.hidden = False
     dimension.collapsed = False
     dimension.outlineLevel = 0
+
+
+def _apply_font_color(cell: Any, color: Any) -> None:
+    """Replace only a cell's font color while retaining its template font style."""
+
+    font = copy(cell.font)
+    font.color = copy(color)
+    cell.font = font
 
 
 def _find_label_row(sheet: Worksheet, column: int, label: str) -> int:
@@ -623,8 +641,12 @@ def _write_signing_sheet(
             detail_start = row
             for record in person_records:
                 _apply_row_style(sheet, row, samples.detail, 20)
-                for column, value in enumerate(record.values, start=1):
-                    sheet.cell(row, column).value = value
+                for column, (value, font_color) in enumerate(
+                    zip(record.values, record.font_colors), start=1
+                ):
+                    cell = sheet.cell(row, column)
+                    cell.value = value
+                    _apply_font_color(cell, font_color)
                 row += 1
             detail_end = row - 1
 
@@ -645,6 +667,9 @@ def _write_signing_sheet(
             if person_index < len(people_items) - 1:
                 _apply_row_style(sheet, row, samples.person_spacer, 20)
                 row += 1
+
+        _apply_row_style(sheet, row, samples.person_spacer, 20)
+        row += 1
 
         group_month = row
         _apply_row_style(sheet, group_month, samples.group_month, 20)
@@ -671,6 +696,9 @@ def _write_signing_sheet(
         if group_index < len(groups) - 1:
             _apply_row_style(sheet, row, samples.group_spacer, 20)
             row += 1
+
+    _apply_row_style(sheet, row, samples.group_spacer, 20)
+    row += 1
 
     department_month = row
     _apply_row_style(sheet, department_month, samples.department_month, 20)
@@ -827,6 +855,33 @@ def _collect_related_parts(archive: zipfile.ZipFile, root_parts: Iterable[str]) 
     return collected
 
 
+def _add_shared_strings_relationship(workbook_rels: bytes) -> bytes:
+    """Keep preserved shared-string cells readable after openpyxl rewrites the book."""
+
+    root = ET.fromstring(workbook_rels)
+    relationships = root.findall(f"{{{XML_REL_NS}}}Relationship")
+    if any(
+        rel.attrib.get("Type") == SHARED_STRINGS_REL_TYPE for rel in relationships
+    ):
+        return workbook_rels
+
+    used_ids = {rel.attrib.get("Id", "") for rel in relationships}
+    index = 1
+    while f"rId{index}" in used_ids:
+        index += 1
+    ET.SubElement(
+        root,
+        f"{{{XML_REL_NS}}}Relationship",
+        {
+            "Id": f"rId{index}",
+            "Type": SHARED_STRINGS_REL_TYPE,
+            "Target": "sharedStrings.xml",
+        },
+    )
+    ET.register_namespace("", XML_REL_NS)
+    return ET.tostring(root, encoding="utf-8", xml_declaration=True)
+
+
 def _restore_non_target_parts(
     template_path: Path, generated_path: Path, patched_path: Path
 ) -> None:
@@ -839,6 +894,9 @@ def _restore_non_target_parts(
     with zipfile.ZipFile(template_path) as source_zip:
         preserved = _collect_related_parts(source_zip, non_target_roots)
         preserved.add("[Content_Types].xml")
+        preserve_shared_strings = "xl/sharedStrings.xml" in source_zip.namelist()
+        if preserve_shared_strings:
+            preserved.add("xl/sharedStrings.xml")
         source_payload = {name: source_zip.read(name) for name in preserved}
     with zipfile.ZipFile(generated_path) as generated_zip, zipfile.ZipFile(
         patched_path, "w", compression=zipfile.ZIP_DEFLATED
@@ -846,7 +904,13 @@ def _restore_non_target_parts(
         for entry in generated_zip.infolist():
             if entry.filename in preserved:
                 continue
-            output_zip.writestr(entry, generated_zip.read(entry.filename))
+            payload = generated_zip.read(entry.filename)
+            if (
+                preserve_shared_strings
+                and entry.filename == "xl/_rels/workbook.xml.rels"
+            ):
+                payload = _add_shared_strings_relationship(payload)
+            output_zip.writestr(entry, payload)
         for name, payload in source_payload.items():
             output_zip.writestr(name, payload)
 
