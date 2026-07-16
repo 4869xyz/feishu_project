@@ -10,6 +10,7 @@ from types import SimpleNamespace
 
 import pytest
 
+from clients.feishu_attachment import DownloadedAttachment
 from clients.feishu_table_export import WikiTablePermissionError
 from feishu_bot_listener import (
     CredentialSafeFormatter,
@@ -21,7 +22,12 @@ from feishu_bot_listener import (
     handle_message,
 )
 from services.aggregation_batch_store import AggregationBatchStore
-from services.sales_workbook_aggregator import AggregationResult, SourceWorkbook
+from services.download_cache import CacheCleanupResult
+from services.sales_workbook_aggregator import (
+    AggregationResult,
+    SourceValidationResult,
+    SourceWorkbook,
+)
 
 
 class StubAttachmentDownloader:
@@ -38,6 +44,21 @@ class PermissionDeniedExporter:
         raise WikiTablePermissionError
 
 
+class ReturningAttachmentDownloader:
+    """Return one deterministic downloaded XLSX."""
+
+    def __init__(self, path: Path) -> None:
+        self.path = path
+
+    def download_from_message(self, message: object) -> DownloadedAttachment:
+        return DownloadedAttachment(
+            path=self.path,
+            bytes_written=self.path.stat().st_size,
+            already_present=False,
+            source_file_id="message:file",
+        )
+
+
 class RecordingChannel:
     """Capture replies sent by the listener."""
 
@@ -48,6 +69,22 @@ class RecordingChannel:
         self, chat_id: str, content: dict[str, str], options: dict[str, str]
     ) -> None:
         self.calls.append((chat_id, content, options))
+
+
+class RecordingCacheCleaner:
+    """Record cleanup input and return a deterministic successful result."""
+
+    def __init__(self) -> None:
+        self.active_source_paths: frozenset[Path] | None = None
+
+    def clear(self, *, active_source_paths) -> CacheCleanupResult:
+        self.active_source_paths = frozenset(Path(path) for path in active_source_paths)
+        return CacheCleanupResult(
+            deleted_files=3,
+            deleted_bytes=1536,
+            preserved_active_files=len(self.active_source_paths),
+            failed_files=0,
+        )
 
 
 def test_wiki_permission_reply_is_explicit() -> None:
@@ -186,11 +223,7 @@ def test_aggregation_command_returns_xlsx_and_clears_batch(
             output_path=Path(output_path),
             source_count=len(sources),
             signing_detail_count=2,
-            repayment_detail_count=1,
             signing_total=Decimal(100),
-            repayment_current_year_total=Decimal(20),
-            repayment_contract_total=Decimal(30),
-            repayment_cumulative_total=Decimal(20),
         )
 
     monkeypatch.setattr("feishu_bot_listener.aggregate_sales_workbooks", fake_aggregate)
@@ -209,6 +242,7 @@ def test_aggregation_command_returns_xlsx_and_clears_batch(
     assert "file" in channel.calls[0][1]
     assert channel.calls[0][1]["file"]["source"].endswith(".xlsx")
     assert "汇总完成" in channel.calls[1][1]["text"]
+    assert "回款" not in channel.calls[1][1]["text"]
     assert store.list_sources("oc_chat", "ou_sender") == ()
 
 
@@ -245,3 +279,113 @@ def test_aggregation_status_is_isolated_by_sender(project_tmp_dir: Path) -> None
     )
 
     assert channel.calls[-1][1]["text"] == "当前汇总批次为空。请先上传销售 XLSX 文件。"
+
+
+def test_staged_attachment_reply_names_selected_signing_sheet(
+    project_tmp_dir: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Users can see which fuzzy-matched signing worksheet was staged."""
+
+    channel = RecordingChannel()
+    source_path = project_tmp_dir / "销售.xlsx"
+    source_path.write_bytes(b"xlsx")
+    message = SimpleNamespace(
+        chat_id="oc_chat",
+        message_id="om_upload",
+        sender_open_id="ou_sender",
+    )
+    store = AggregationBatchStore(project_tmp_dir / "aggregation")
+    monkeypatch.setattr(
+        "feishu_bot_listener.validate_source_workbook",
+        lambda source: SourceValidationResult("2026签约情况", 3),
+    )
+
+    asyncio.run(
+        handle_message(
+            channel,
+            ReturningAttachmentDownloader(source_path),
+            PermissionDeniedExporter(),
+            message,
+            asyncio.Lock(),
+            batch_store=store,
+            sales_template_path=project_tmp_dir / "template.xlsx",
+        )
+    )
+
+    reply = channel.calls[-1][1]["text"]
+    assert "签约工作表“2026签约情况”" in reply
+    assert "签约 3 条" in reply
+    assert "回款" not in reply
+
+
+def test_cache_cleanup_command_is_admin_only_and_preserves_all_active_sources(
+    project_tmp_dir: Path,
+) -> None:
+    """An authorized administrator starts global cleanup with all active paths protected."""
+
+    channel = RecordingChannel()
+    store = AggregationBatchStore(project_tmp_dir / "aggregation")
+    source_path = project_tmp_dir / "active.xlsx"
+    source_path.write_bytes(b"active")
+    store.add_source(
+        "another-chat",
+        "another-sender",
+        SourceWorkbook("source-id", source_path),
+        display_name="active.xlsx",
+    )
+    cleaner = RecordingCacheCleaner()
+    message = SimpleNamespace(
+        chat_id="oc_chat",
+        message_id="om_cleanup",
+        sender_open_id="ou_admin",
+        content_text="清空下载缓存",
+    )
+
+    asyncio.run(
+        handle_message(
+            channel,
+            StubAttachmentDownloader(),
+            PermissionDeniedExporter(),
+            message,
+            asyncio.Lock(),
+            batch_store=store,
+            cache_cleaner=cleaner,
+            cache_admin_open_ids=("ou_admin",),
+        )
+    )
+
+    assert cleaner.active_source_paths == frozenset((source_path.resolve(),))
+    reply = channel.calls[-1][1]["text"]
+    assert "删除 3 个文件" in reply
+    assert "释放 1.50 KB" in reply
+    assert "保留活动批次文件 1 个" in reply
+
+
+def test_cache_cleanup_command_rejects_non_admin(project_tmp_dir: Path) -> None:
+    """An unlisted sender cannot invoke any cache deletion."""
+
+    channel = RecordingChannel()
+    cleaner = RecordingCacheCleaner()
+    message = SimpleNamespace(
+        chat_id="oc_chat",
+        message_id="om_cleanup",
+        sender_open_id="ou_not_admin",
+        content_text="清空下载缓存",
+    )
+
+    asyncio.run(
+        handle_message(
+            channel,
+            StubAttachmentDownloader(),
+            PermissionDeniedExporter(),
+            message,
+            asyncio.Lock(),
+            batch_store=AggregationBatchStore(project_tmp_dir / "aggregation"),
+            cache_cleaner=cleaner,
+            cache_admin_open_ids=("ou_admin",),
+        )
+    )
+
+    assert cleaner.active_source_paths is None
+    assert channel.calls[-1][1]["text"] == "你没有执行“清空下载缓存”的权限。"

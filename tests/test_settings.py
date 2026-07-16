@@ -39,6 +39,24 @@ def test_load_settings_from_environment(project_tmp_dir: Path) -> None:
     assert settings.sales_template_path == (project_tmp_dir / "template.xlsx").resolve()
     assert settings.max_download_bytes == 100 * 1024 * 1024
     assert settings.log_level == "DEBUG"
+    assert settings.cache_admin_open_ids == ()
+
+
+def test_cache_admin_open_ids_are_trimmed_and_deduplicated(
+    project_tmp_dir: Path,
+) -> None:
+    """The optional administrator allowlist accepts comma-separated open IDs."""
+
+    environment = _valid_environment()
+    environment["FEISHU_CACHE_ADMIN_OPEN_IDS"] = "ou_first, ou_second,ou_first"
+
+    settings = load_settings(
+        env_file=None,
+        environ=environment,
+        project_root=project_tmp_dir,
+    )
+
+    assert settings.cache_admin_open_ids == ("ou_first", "ou_second")
 
 
 def test_missing_required_environment_variable_is_explicit(

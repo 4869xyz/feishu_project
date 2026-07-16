@@ -1,4 +1,4 @@
-"""End-to-end tests for SOP-driven XLSX aggregation."""
+"""End-to-end tests for signing-only XLSX aggregation."""
 
 from __future__ import annotations
 
@@ -11,6 +11,7 @@ from openpyxl.styles import Font, PatternFill
 
 from services.sales_workbook_aggregator import (
     DuplicateSourceError,
+    SalesAggregationError,
     SourceValidationError,
     SourceWorkbook,
     aggregate_sales_workbooks,
@@ -40,47 +41,40 @@ def _write_signing_headers(sheet) -> None:
         sheet.cell(3, 9 + index).value = f"{index + 1}月"
 
 
-def _write_repayment_headers(sheet) -> None:
-    headers = [
-        "姓名",
-        "收款主体",
-        "付款主体",
-        "产品",
-        "合同日期",
-        "合同总价",
-        "居间费",
-        "已回款-提成口（26年以前）",
-        "已回款-提成口径（26年）",
-        "已回款-提成口径总额",
-        "待回款额",
-        " 已开发票金额 ",
-        " 已开票未回款 ",
-        "回款比例",
-        "税/运费",
-        "预计剩余回款时间及金额",
-        "备注",
-        "已回款-业绩口径(26年)",
-    ]
-    for column, value in enumerate(headers, 1):
-        sheet.cell(2, column).value = value
-    for index in range(12):
-        sheet.cell(3, 18 + index).value = f"{index + 1}月"
+def _write_signing_rows(sheet, rows: list[list]) -> None:
+    _write_signing_headers(sheet)
+    for row, values in enumerate(rows, 4):
+        for column, value in enumerate(values, 1):
+            sheet.cell(row, column).value = value
 
 
-def _make_source(path: Path, signing_rows: list[list], repayment_rows: list[list]) -> None:
+def _make_source(
+    path: Path,
+    signing_rows: list[list],
+    *,
+    signing_sheet_name: str = "签约数据",
+    other_sheet_names: tuple[str, ...] = (),
+) -> None:
     workbook = Workbook()
     signing = workbook.active
-    signing.title = "Sheet1"
-    _write_signing_headers(signing)
-    for row, values in enumerate(signing_rows, 4):
-        for column, value in enumerate(values, 1):
-            signing.cell(row, column).value = value
+    signing.title = signing_sheet_name
+    _write_signing_rows(signing, signing_rows)
+    for name in other_sheet_names:
+        other = workbook.create_sheet(name)
+        other["A1"] = "该工作表应被忽略"
+        other["F4"] = "回款金额故意写成非法文本"
+    workbook.save(path)
 
-    repayment = workbook.create_sheet("Sheet2")
-    _write_repayment_headers(repayment)
-    for row, values in enumerate(repayment_rows, 4):
-        for column, value in enumerate(values, 1):
-            repayment.cell(row, column).value = value
+
+def _make_candidate_source(path: Path, sheet_names: list[str]) -> None:
+    workbook = Workbook()
+    workbook.remove(workbook.active)
+    for index, name in enumerate(sheet_names, 1):
+        sheet = workbook.create_sheet(name)
+        _write_signing_rows(
+            sheet,
+            [[f"第{index}组", 1, f"人员{index}", None, None, None, None, None, index]],
+        )
     workbook.save(path)
 
 
@@ -92,7 +86,7 @@ def _style_row(sheet, row: int, max_column: int, color: str) -> None:
     sheet.row_dimensions[row].height = 20 + row % 3
 
 
-def _make_template(path: Path) -> None:
+def _make_template(path: Path, *, include_repayment: bool = True) -> None:
     workbook = Workbook()
     signing = workbook.active
     signing.title = SIGNING_TARGET
@@ -121,34 +115,74 @@ def _make_template(path: Path) -> None:
     ranking["A1"] = "必须保留"
     ranking["B2"] = "=1+1"
 
-    repayment = workbook.create_sheet(REPAYMENT_TARGET)
-    _write_repayment_headers(repayment)
-    repayment["A4"] = "样例人员"
-    repayment["D5"] = "个人小计："
-    repayment["D7"] = "部门总计："
-    for row in range(4, 8):
-        _style_row(repayment, row, 29, f"EE{row:02X}{row:02X}")
+    if include_repayment:
+        repayment = workbook.create_sheet(REPAYMENT_TARGET)
+        repayment["A1"] = "回款表必须原样保留"
+        repayment["F4"] = "旧回款内容"
+        repayment["G5"] = "=1+1"
+        repayment.row_dimensions[6].hidden = True
 
     detail = workbook.create_sheet("明细")
     detail["A1"] = "必须保留"
     workbook.save(path)
 
 
-def _repayment_row(person: str, contract: int, prior: int, january: int) -> list:
-    row = [None] * 29
-    row[0] = person
-    row[1] = "收款主体"
-    row[5] = contract
-    row[6] = "/"
-    row[7] = prior
-    row[11] = 1
-    row[17] = january
-    return row
+@pytest.mark.parametrize("sheet_name", ["Sheet1", "签约数据", "任意名称"])
+def test_single_sheet_uses_its_only_worksheet(
+    project_tmp_dir: Path, sheet_name: str
+) -> None:
+    source = project_tmp_dir / f"single-{sheet_name}.xlsx"
+    _make_source(
+        source,
+        [["甲组", 1, "A", None, None, None, None, None, 10]],
+        signing_sheet_name=sheet_name,
+    )
+
+    result = validate_source_workbook(SourceWorkbook("single", source))
+
+    assert result.signing_sheet_name == sheet_name
+    assert result.signing_detail_count == 1
 
 
-def test_aggregate_rebuilds_formulas_order_and_control_totals(project_tmp_dir: Path) -> None:
-    """Different source IDs count twice and all summary layers reconcile."""
+@pytest.mark.parametrize(
+    ("sheet_names", "expected"),
+    [
+        (["销售签约数据", "签约数据", "签约情况"], "签约情况"),
+        (["销售签约数据", "签约数据"], "签约数据"),
+        (["销售签约数据", "2026签约情况"], "2026签约情况"),
+        (["销售签约数据", "历史签约数据"], "销售签约数据"),
+    ],
+)
+def test_multi_sheet_uses_confirmed_name_priority(
+    project_tmp_dir: Path, sheet_names: list[str], expected: str
+) -> None:
+    source = project_tmp_dir / "candidates.xlsx"
+    _make_candidate_source(source, sheet_names)
 
+    result = validate_source_workbook(SourceWorkbook("candidate", source))
+
+    assert result.signing_sheet_name == expected
+    assert result.signing_detail_count == 1
+
+
+def test_multi_sheet_without_candidate_lists_available_names(
+    project_tmp_dir: Path,
+) -> None:
+    source = project_tmp_dir / "no-signing-source.xlsx"
+    _make_candidate_source(source, ["签约汇总", "签约排名"])
+
+    with pytest.raises(SourceValidationError) as exc_info:
+        validate_source_workbook(SourceWorkbook("missing", source))
+
+    message = str(exc_info.value)
+    assert "未找到" in message
+    assert "签约汇总" in message
+    assert "签约排名" in message
+
+
+def test_aggregate_rebuilds_signing_and_preserves_repayment(
+    project_tmp_dir: Path,
+) -> None:
     template = project_tmp_dir / "template.xlsx"
     source1 = project_tmp_dir / "source1.xlsx"
     source2 = project_tmp_dir / "source2.xlsx"
@@ -160,7 +194,7 @@ def test_aggregate_rebuilds_formulas_order_and_control_totals(project_tmp_dir: P
             ["甲组", 1, "A", "客户1", "项目", None, None, None, 10],
             [None, 2, "A", "客户2", "项目", None, None, None, None, 20],
         ],
-        [_repayment_row("张三", 100, 10, 20)],
+        other_sheet_names=("回款数据",),
     )
     _make_source(
         source2,
@@ -168,10 +202,8 @@ def test_aggregate_rebuilds_formulas_order_and_control_totals(project_tmp_dir: P
             ["甲组", 1, "A", "客户1", "项目", None, None, None, 10],
             ["乙组", 1, "B", "客户3", "项目", None, None, None, None, None, 5],
         ],
-        [
-            _repayment_row("张三", 100, 10, 20),
-            _repayment_row("李四", 0, 0, 0),
-        ],
+        signing_sheet_name="2026签约情况",
+        other_sheet_names=("损坏的回款情况",),
     )
 
     result = aggregate_sales_workbooks(
@@ -181,15 +213,10 @@ def test_aggregate_rebuilds_formulas_order_and_control_totals(project_tmp_dir: P
     )
 
     assert result.signing_detail_count == 4
-    assert result.repayment_detail_count == 3
     assert result.signing_total == Decimal(45)
-    assert result.repayment_current_year_total == Decimal(40)
-    assert result.repayment_contract_total == Decimal(200)
-    assert result.repayment_cumulative_total == Decimal(60)
 
     workbook = load_workbook(output, data_only=False)
     signing = workbook[SIGNING_TARGET]
-    repayment = workbook[REPAYMENT_TARGET]
     assert signing.max_row == 23
     assert signing["A4"].value == "甲组"
     assert signing["A14"].value == "乙组"
@@ -200,42 +227,74 @@ def test_aggregate_rebuilds_formulas_order_and_control_totals(project_tmp_dir: P
     assert "A14:A20" in {str(item) for item in signing.merged_cells.ranges}
     assert all(not signing.row_dimensions[row].hidden for row in range(4, 24))
 
-    assert repayment.max_row == 10
-    assert repayment["I4"].value == "=SUM(R4:AC4)"
-    assert repayment["J4"].value == "=SUM(H4:I4)"
-    assert repayment["K4"].value == "=F4-J4"
-    assert repayment["N4"].value == "=IFERROR(J4/F4,0)"
-    assert repayment["F10"].value == "=SUM(F6,F9)"
+    repayment = workbook[REPAYMENT_TARGET]
+    assert repayment["A1"].value == "回款表必须原样保留"
+    assert repayment["F4"].value == "旧回款内容"
+    assert repayment["G5"].value == "=1+1"
+    assert repayment.row_dimensions[6].hidden is True
     assert workbook["展示用-签约排名汇总（0702统计）"]["A1"].value == "必须保留"
     assert workbook["明细"]["A1"].value == "必须保留"
     workbook.close()
 
 
-def test_duplicate_source_id_is_rejected(project_tmp_dir: Path) -> None:
-    """Task-level file idempotency is independent from workbook contents."""
+def test_template_without_repayment_sheet_still_succeeds(project_tmp_dir: Path) -> None:
+    template = project_tmp_dir / "template.xlsx"
+    source = project_tmp_dir / "source.xlsx"
+    output = project_tmp_dir / "output.xlsx"
+    _make_template(template, include_repayment=False)
+    _make_source(
+        source,
+        [["甲组", 1, "A", None, None, None, None, None, 1]],
+        signing_sheet_name="任意单表名称",
+    )
 
+    aggregate_sales_workbooks([SourceWorkbook("one", source)], template, output)
+
+    workbook = load_workbook(output, read_only=True)
+    assert SIGNING_TARGET in workbook.sheetnames
+    assert REPAYMENT_TARGET not in workbook.sheetnames
+    workbook.close()
+
+
+def test_duplicate_source_id_is_rejected(project_tmp_dir: Path) -> None:
     template = project_tmp_dir / "template.xlsx"
     source = project_tmp_dir / "source.xlsx"
     _make_template(template)
     _make_source(
         source,
         [["甲组", 1, "A", None, None, None, None, None, 1]],
-        [_repayment_row("张三", 1, 0, 1)],
+        signing_sheet_name="Sheet1",
     )
     item = SourceWorkbook("same", source)
     with pytest.raises(DuplicateSourceError):
         aggregate_sales_workbooks([item, item], template, project_tmp_dir / "out.xlsx")
 
 
-def test_invalid_amount_reports_sheet_row_and_column(project_tmp_dir: Path) -> None:
-    """A malformed business amount is rejected before a partial output exists."""
-
+def test_invalid_amount_reports_selected_sheet_row_and_column(
+    project_tmp_dir: Path,
+) -> None:
     source = project_tmp_dir / "source.xlsx"
     _make_source(
         source,
         [["甲组", 1, "A", None, None, None, None, None, "不是金额"]],
-        [_repayment_row("张三", 1, 0, 1)],
+        signing_sheet_name="任意名称",
     )
 
-    with pytest.raises(SourceValidationError, match="Sheet1.*第 4 行.*I 列"):
+    with pytest.raises(SourceValidationError, match="任意名称.*第 4 行.*I 列"):
         validate_source_workbook(SourceWorkbook("source", source))
+
+
+def test_empty_signing_data_is_rejected_during_aggregation(
+    project_tmp_dir: Path,
+) -> None:
+    template = project_tmp_dir / "template.xlsx"
+    source = project_tmp_dir / "empty.xlsx"
+    _make_template(template)
+    _make_source(source, [], signing_sheet_name="Sheet1")
+
+    with pytest.raises(SalesAggregationError, match="没有有效签约明细"):
+        aggregate_sales_workbooks(
+            [SourceWorkbook("empty", source)],
+            template,
+            project_tmp_dir / "out.xlsx",
+        )

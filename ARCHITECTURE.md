@@ -12,8 +12,9 @@
 | `clients.feishu_client` | tenant token 缓存、飞书 HTTP 请求、Wiki 查询、导出任务和二进制下载。 | `config`、`requests`、标准库 |
 | `clients.feishu_attachment` | 解析文件消息、校验 Excel 后缀、生成收件箱安全文件名。 | 标准库、消息资源下载协议 |
 | `clients.feishu_table_export` | 识别表格链接、解析 Wiki 真实对象、生成归档路径。 | `feishu_client` 的导出协议、标准库 |
-| `services.sales_workbook_aggregator` | 校验源工作簿，按 SOP 重建签约和回款目标表，校验控制总额并原子保存。 | `openpyxl`、标准库 |
+| `services.sales_workbook_aggregator` | 按名称优先级选择并校验签约工作表，重建签约目标表、校验控制总额并原子保存。 | `openpyxl`、标准库 |
 | `services.aggregation_batch_store` | 按聊天和发送人持久化批次、上传顺序和已处理来源 ID。 | 标准库 |
+| `services.download_cache` | 只在配置的缓存根目录内删除非活动文件，并保护活动批次和显式保护路径。 | 标准库 |
 | `feishu_bot_listener.py` | 配置消息准入、日志和单实例锁，创建长连接、串行编排并把结果或文件转换为飞书回复。 | `config`、`clients`、`services`、`lark-channel-sdk` |
 | `tests` | 使用 fake/mock 验证配置、API 参数、解析、归档和回复。 | 被测模块、`pytest` |
 
@@ -46,21 +47,25 @@
        -> services.aggregation_batch_store（chat_id + sender_open_id 隔离）
        -> 用户命令：汇总状态 | 清空汇总 | 汇总
        -> aggregate_sales_workbooks()
-            -> 清空模板中的两个目标业务表
-            -> 按上传顺序重建明细、统计、合并单元格与公式
+            -> 只清空模板中的签约目标表
+            -> 按上传顺序重建签约明细、统计、合并单元格与公式
             -> 控制总额和公式结构校验
             -> data/aggregation/output/YYYY-MM/<owner-hash>/...xlsx
        -> 飞书文件回复；成功后清空当前批次
+       └─ 管理员命令：清空下载缓存
+           -> 校验 FEISHU_CACHE_ADMIN_OPEN_IDS
+           -> 汇总所有批次的活动源文件路径
+           -> 清理 data/inbox、data/archive、data/aggregation/output
+           -> 保留活动源文件、模板和 .gitkeep
   -> 飞书回复 + logs/feishu_bot_listener.log
 ```
 
 ## Excel 汇总约束
 
-- 只接收 `.xlsx`；源表必须包含 SOP 规定的 `Sheet1`、`Sheet2` 表头和字段类型。
+- 只接收 `.xlsx`；单工作表直接作为签约表，多工作表按 `签约情况`、`签约数据`、模糊名称优先级选表，选中表必须符合 A:T 签约结构。
 - 来源 ID 用于防止同一文件重复加入批次；业务明细不按姓名或内容去重，相同内容的不同来源记录会全部保留。
-- 模板中只重建签约汇总表和回款汇总表，其他工作表及其 OOXML 关系、图片等部件原样保留。
-- 签约按来源顺序和首次出现顺序输出明细、个人、小组、部门统计；回款输出明细、个人小计和部门总计。
-- 公式统一生成，回款剩余金额使用 `F-J`，允许负数；控制总额使用独立的 `Decimal` 计算核对。
+- 模板中只重建签约汇总表；回款表及其他工作表的 XML、关系、图片等部件原样保留，回款错误不得阻断签约。
+- 签约按来源顺序和首次出现顺序输出明细、个人、小组、部门统计，并使用独立的 `Decimal` 控制总额核对。
 - 输出先写临时文件，重开校验公式、隐藏行和目标表结构后再原子替换正式文件。
 
 ## 表格链接导出约束
@@ -77,6 +82,8 @@
 - `PolicyConfig` 显式固定为私聊开放、群聊开放、群聊必须直接提及机器人，并忽略仅 `@所有人` 的触发。
 - 监听器进程生命周期内持有 `logs/feishu_bot_listener.lock` 的非阻塞跨平台文件锁；同一项目目录不能同时启动第二个实例。
 - 进程内附件下载和链接导出共用一个 `asyncio.Lock`，避免多个阻塞式文件任务并发执行。
+- 汇总和全局缓存清理共用同一文件锁；缓存清理只允许 `FEISHU_CACHE_ADMIN_OPEN_IDS` 白名单中的发送人执行，未配置时命令禁用。
+- 缓存清理会先读取所有批次状态并保护仍被引用的源文件，只扫描 `data/inbox/`、`data/archive/` 和汇总 `output/`；不扫描或删除批次 `state/`。
 - Lark SDK 日志统一传播到根日志管线；Lark 与 `httpx` 的最低级别固定为 `WARNING`，格式化器继续兜底清理 `access_key`、`ticket`、`access_token` 和 `app_secret` 查询参数。
 
 ## 运行产物与安全

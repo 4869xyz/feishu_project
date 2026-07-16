@@ -12,6 +12,7 @@
 | `FEISHU_ARCHIVE_DIR` | `./data/archive` | Sheets/Wiki 链接导出的归档根目录。 |
 | `FEISHU_AGGREGATION_DIR` | `./data/aggregation` | 汇总批次状态和结果的根目录。 |
 | `FEISHU_SALES_TEMPLATE_PATH` | 无 | 必填的销售汇总模板 `.xlsx` 路径。 |
+| `FEISHU_CACHE_ADMIN_OPEN_IDS` | 空 | 可执行 `清空下载缓存` 的飞书用户 `open_id`，多个值用英文逗号分隔；为空时禁用命令。 |
 | `FEISHU_MAX_DOWNLOAD_BYTES` | `104857600` | 单文件本地上限，范围为 1 到 100 MB。 |
 | `LOG_LEVEL` | `INFO` | Python 日志级别。 |
 

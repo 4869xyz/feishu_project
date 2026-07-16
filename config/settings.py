@@ -43,6 +43,7 @@ class Settings:
     log_level: str
     aggregation_dir: Path = Path("./data/aggregation")
     sales_template_path: Path = Path("./template.xlsx")
+    cache_admin_open_ids: tuple[str, ...] = ()
 
 
 def _read_values(
@@ -149,6 +150,13 @@ def load_settings(
     sales_template_path = _resolve_project_path(
         required["FEISHU_SALES_TEMPLATE_PATH"], root
     )
+    cache_admin_open_ids = tuple(
+        dict.fromkeys(
+            item.strip()
+            for item in values.get("FEISHU_CACHE_ADMIN_OPEN_IDS", "").split(",")
+            if item.strip()
+        )
+    )
     max_download_raw = values.get(
         "FEISHU_MAX_DOWNLOAD_BYTES", str(MAX_MESSAGE_RESOURCE_BYTES)
     ).strip()
@@ -170,6 +178,7 @@ def load_settings(
         archive_dir=archive_dir,
         aggregation_dir=aggregation_dir,
         sales_template_path=sales_template_path,
+        cache_admin_open_ids=cache_admin_open_ids,
         max_download_bytes=max_download_bytes,
         log_level=log_level,
     )

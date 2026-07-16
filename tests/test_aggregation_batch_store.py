@@ -69,3 +69,33 @@ def test_batch_store_isolates_owners_and_builds_xlsx_path(project_tmp_dir: Path)
     )
     assert output.suffix == ".xlsx"
     assert output.parent.parent.name == "2026-07"
+
+
+def test_all_active_source_paths_covers_every_owner(project_tmp_dir: Path) -> None:
+    """Global cleanup protection includes active files from every persisted batch."""
+
+    store = AggregationBatchStore(project_tmp_dir / "aggregation")
+    first_path = project_tmp_dir / "first.xlsx"
+    second_path = project_tmp_dir / "second.xlsx"
+    first_path.write_bytes(b"first")
+    second_path.write_bytes(b"second")
+    store.add_source(
+        "chat-a",
+        "sender-a",
+        SourceWorkbook("source-a", first_path),
+        display_name="first.xlsx",
+    )
+    store.add_source(
+        "chat-b",
+        "sender-b",
+        SourceWorkbook("source-b", second_path),
+        display_name="second.xlsx",
+    )
+
+    assert store.all_active_source_paths() == frozenset(
+        (first_path.resolve(), second_path.resolve())
+    )
+
+    store.clear_active("chat-a", "sender-a")
+
+    assert store.all_active_source_paths() == frozenset((second_path.resolve(),))

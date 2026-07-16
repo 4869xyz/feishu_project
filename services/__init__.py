@@ -1,9 +1,12 @@
 """Business services used by the Feishu listener."""
 
+from services.download_cache import CacheCleanupResult, DownloadCacheCleaner
+
 from services.sales_workbook_aggregator import (
     AggregationResult,
     DuplicateSourceError,
     SalesAggregationError,
+    SourceValidationResult,
     SourceValidationError,
     SourceWorkbook,
     TemplateValidationError,
@@ -12,9 +15,12 @@ from services.sales_workbook_aggregator import (
 )
 
 __all__ = [
+    "CacheCleanupResult",
+    "DownloadCacheCleaner",
     "AggregationResult",
     "DuplicateSourceError",
     "SalesAggregationError",
+    "SourceValidationResult",
     "SourceValidationError",
     "SourceWorkbook",
     "TemplateValidationError",

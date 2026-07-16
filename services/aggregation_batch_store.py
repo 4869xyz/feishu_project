@@ -128,6 +128,26 @@ class AggregationBatchStore:
         self._save(chat_id, sender_open_id, state)
         return count
 
+    def all_active_source_paths(self) -> frozenset[Path]:
+        """Return every source path referenced by any active persisted batch."""
+
+        active: set[Path] = set()
+        for path in self.state_dir.glob("*.json"):
+            try:
+                state = json.loads(path.read_text(encoding="utf-8"))
+            except (OSError, json.JSONDecodeError) as exc:
+                raise RuntimeError(f"无法读取汇总批次状态：{path.name}") from exc
+            if state.get("version") != 1 or not isinstance(
+                state.get("active_sources"), list
+            ):
+                raise RuntimeError(f"汇总批次状态结构无效：{path.name}")
+            for item in state["active_sources"]:
+                source_path = item.get("path") if isinstance(item, dict) else None
+                if not isinstance(source_path, str) or not source_path.strip():
+                    raise RuntimeError(f"汇总批次状态结构无效：{path.name}")
+                active.add(Path(source_path).resolve())
+        return frozenset(active)
+
     def new_output_path(
         self,
         chat_id: str,

@@ -26,6 +26,7 @@ from clients.feishu_table_export import (
 )
 from config.settings import ConfigurationError, Settings, load_settings
 from services.aggregation_batch_store import AggregationBatchStore
+from services.download_cache import DownloadCacheCleaner
 from services.sales_workbook_aggregator import (
     SalesAggregationError,
     SourceWorkbook,
@@ -44,6 +45,8 @@ WIKI_PERMISSION_REPLY = (
     "请确认当前应用已加入该知识库或文档，并拥有节点阅读和云文档导出权限，然后重新发送链接。"
 )
 AGGREGATION_COMMANDS = frozenset({"汇总", "汇总状态", "清空汇总"})
+CACHE_CLEANUP_COMMAND = "清空下载缓存"
+BOT_COMMANDS = AGGREGATION_COMMANDS | {CACHE_CLEANUP_COMMAND}
 
 
 class SingleInstanceError(RuntimeError):
@@ -199,16 +202,16 @@ async def _reply_file(channel: FeishuChannel, message: Any, path: Path) -> bool:
         return False
 
 
-def _aggregation_command(message: object) -> str | None:
-    """Recognize an exact aggregation command after removing mention markup."""
+def _bot_command(message: object) -> str | None:
+    """Recognize an exact supported command after removing mention markup."""
 
     for text in message_texts(message):
         cleaned = re.sub(r"<at\b[^>]*>.*?</at>", " ", text, flags=re.IGNORECASE)
         cleaned = cleaned.strip()
-        if cleaned in AGGREGATION_COMMANDS:
+        if cleaned in BOT_COMMANDS:
             return cleaned
         parts = cleaned.split()
-        if parts and parts[-1] in AGGREGATION_COMMANDS and all(
+        if parts and parts[-1] in BOT_COMMANDS and all(
             part.startswith("@") or part.startswith("_user_") for part in parts[:-1]
         ):
             return parts[-1]
@@ -222,6 +225,59 @@ def _batch_identity(message: object) -> tuple[str, str]:
     if not isinstance(chat_id, str) or not chat_id.strip():
         raise ValueError("消息缺少 chat_id")
     return chat_id.strip(), message_sender_open_id(message)
+
+
+def _format_file_size(size: int) -> str:
+    """Return a compact binary file-size string for user replies."""
+
+    value = float(size)
+    for unit in ("B", "KB", "MB", "GB", "TB"):
+        if value < 1024 or unit == "TB":
+            return f"{int(value)} {unit}" if unit == "B" else f"{value:.2f} {unit}"
+        value /= 1024
+    return f"{size} B"
+
+
+async def _handle_cache_cleanup_command(
+    channel: FeishuChannel,
+    message: Any,
+    download_lock: asyncio.Lock,
+    batch_store: AggregationBatchStore,
+    cache_cleaner: DownloadCacheCleaner,
+    cache_admin_open_ids: tuple[str, ...],
+) -> None:
+    """Authorize and execute one global inactive-cache cleanup."""
+
+    sender_open_id = message_sender_open_id(message)
+    if not cache_admin_open_ids:
+        await _reply(
+            channel,
+            message,
+            "清空下载缓存命令尚未启用。请先在 .env 配置 FEISHU_CACHE_ADMIN_OPEN_IDS 并重启机器人。",
+        )
+        return
+    if sender_open_id not in cache_admin_open_ids:
+        LOGGER.warning(
+            "非管理员尝试执行下载缓存清理：message_id=%s",
+            getattr(message, "message_id", "unknown"),
+        )
+        await _reply(channel, message, "你没有执行“清空下载缓存”的权限。")
+        return
+
+    async with download_lock:
+        active_paths = batch_store.all_active_source_paths()
+        result = await asyncio.to_thread(
+            cache_cleaner.clear,
+            active_source_paths=active_paths,
+        )
+    reply = (
+        f"下载缓存清理完成：删除 {result.deleted_files} 个文件，"
+        f"释放 {_format_file_size(result.deleted_bytes)}；"
+        f"保留活动批次文件 {result.preserved_active_files} 个。"
+    )
+    if result.failed_files:
+        reply += f"另有 {result.failed_files} 个文件删除失败，请查看日志。"
+    await _reply(channel, message, reply)
 
 
 async def _handle_aggregation_command(
@@ -288,10 +344,10 @@ async def _handle_aggregation_command(
             message,
             "汇总完成："
             f"{result.source_count} 份源文件，"
-            f"签约 {result.signing_detail_count} 条 / {result.signing_total} 元，"
-            f"回款 {result.repayment_detail_count} 条 / "
-            f"{result.repayment_current_year_total} 元。",
+            f"签约 {result.signing_detail_count} 条 / {result.signing_total} 元。",
         )
+
+
 async def handle_message(
     channel: FeishuChannel,
     attachment_downloader: ExcelAttachmentDownloader,
@@ -301,12 +357,36 @@ async def handle_message(
     *,
     batch_store: AggregationBatchStore | None = None,
     sales_template_path: Path | None = None,
+    cache_cleaner: DownloadCacheCleaner | None = None,
+    cache_admin_open_ids: tuple[str, ...] = (),
 ) -> None:
     """Handle one direct Excel attachment or supported Feishu table link."""
 
+    command = _bot_command(message)
+    if command == CACHE_CLEANUP_COMMAND:
+        if batch_store is None or cache_cleaner is None:
+            await _reply(channel, message, "清空下载缓存命令当前不可用。")
+            return
+        try:
+            await _handle_cache_cleanup_command(
+                channel,
+                message,
+                download_lock,
+                batch_store,
+                cache_cleaner,
+                cache_admin_open_ids,
+            )
+        except (OSError, ValueError, RuntimeError) as exc:
+            LOGGER.warning(
+                "处理缓存清理命令失败：message_id=%s, error=%s",
+                getattr(message, "message_id", "unknown"),
+                exc,
+            )
+            await _reply(channel, message, f"清空下载缓存失败：{exc}")
+        return
+
     if batch_store is not None and sales_template_path is not None:
-        command = _aggregation_command(message)
-        if command is not None:
+        if command in AGGREGATION_COMMANDS:
             try:
                 await _handle_aggregation_command(
                     channel,
@@ -340,7 +420,7 @@ async def handle_message(
                 downloaded = attachment or table_export
                 if downloaded is not None:
                     source = SourceWorkbook(downloaded.source_file_id, downloaded.path)
-                    signing_count, repayment_count = await asyncio.to_thread(
+                    validation = await asyncio.to_thread(
                         validate_source_workbook, source
                     )
                     chat_id, sender_open_id = _batch_identity(message)
@@ -352,8 +432,8 @@ async def handle_message(
                     )
                     staged_result = (
                         staged_result,
-                        signing_count,
-                        repayment_count,
+                        validation.signing_sheet_name,
+                        validation.signing_detail_count,
                     )
     except UnsupportedExcelAttachment as exc:
         await _reply(channel, message, f"未下载附件：{exc}")
@@ -397,12 +477,12 @@ async def handle_message(
 
     if attachment is not None:
         if staged_result is not None:
-            added, signing_count, repayment_count = staged_result
+            added, signing_sheet_name, signing_count = staged_result
             if added.added:
                 text = (
                     f"Excel 已加入当前汇总批次（共 {added.active_count} 份）："
-                    f"{attachment.path.name}；签约 {signing_count} 条，"
-                    f"回款 {repayment_count} 条。上传完成后发送“汇总”。"
+                    f"{attachment.path.name}；签约工作表“{signing_sheet_name}”，"
+                    f"签约 {signing_count} 条。上传完成后发送“汇总”。"
                 )
             else:
                 text = f"该 Excel 已处理过，不会重复加入汇总批次：{attachment.path.name}"
@@ -425,12 +505,12 @@ async def handle_message(
 
     if table_export is not None:
         if staged_result is not None:
-            added, signing_count, repayment_count = staged_result
+            added, signing_sheet_name, signing_count = staged_result
             if added.added:
                 text = (
                     f"飞书表格已加入当前汇总批次（共 {added.active_count} 份）："
-                    f"{table_export.path.name}；签约 {signing_count} 条，"
-                    f"回款 {repayment_count} 条。上传完成后发送“汇总”。"
+                    f"{table_export.path.name}；签约工作表“{signing_sheet_name}”，"
+                    f"签约 {signing_count} 条。上传完成后发送“汇总”。"
                 )
             else:
                 text = f"该飞书表格已处理过，不会重复加入汇总批次：{table_export.path.name}"
@@ -471,6 +551,10 @@ async def _run_listener(settings: Settings) -> None:
         max_bytes=settings.max_download_bytes,
     )
     batch_store = AggregationBatchStore(settings.aggregation_dir)
+    cache_cleaner = DownloadCacheCleaner(
+        (settings.inbox_dir, settings.archive_dir, batch_store.output_dir),
+        protected_paths=(settings.sales_template_path,),
+    )
     download_lock = asyncio.Lock()
 
     async def on_message(message: Any) -> None:
@@ -482,6 +566,8 @@ async def _run_listener(settings: Settings) -> None:
             download_lock,
             batch_store=batch_store,
             sales_template_path=settings.sales_template_path,
+            cache_cleaner=cache_cleaner,
+            cache_admin_open_ids=settings.cache_admin_open_ids,
         )
 
     async def on_error(error: Exception) -> None:

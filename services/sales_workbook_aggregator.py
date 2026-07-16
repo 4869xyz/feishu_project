@@ -1,4 +1,4 @@
-"""Rebuild sales signing and repayment summaries from ordered XLSX sources."""
+"""Rebuild the sales signing summary from ordered XLSX sources."""
 
 from __future__ import annotations
 
@@ -21,7 +21,6 @@ from openpyxl.utils import get_column_letter
 from openpyxl.worksheet.worksheet import Worksheet
 
 
-SIGNING_SOURCE_SHEET = "Sheet1"
 REPAYMENT_SOURCE_SHEET = "Sheet2"
 SIGNING_TARGET_SHEET = "展示用-2026年签约数据汇总（0702统计）"
 REPAYMENT_TARGET_SHEET = "展示用-2026年回款数据汇总(0702统计)"
@@ -76,16 +75,20 @@ class SourceWorkbook:
 
 @dataclass(frozen=True, slots=True)
 class AggregationResult:
-    """Control totals and the generated XLSX path."""
+    """Signing control totals and the generated XLSX path."""
 
     output_path: Path
     source_count: int
     signing_detail_count: int
-    repayment_detail_count: int
     signing_total: Decimal
-    repayment_current_year_total: Decimal
-    repayment_contract_total: Decimal
-    repayment_cumulative_total: Decimal
+
+
+@dataclass(frozen=True, slots=True)
+class SourceValidationResult:
+    """The selected signing worksheet and its valid detail count."""
+
+    signing_sheet_name: str
+    signing_detail_count: int
 
 
 @dataclass(frozen=True, slots=True)
@@ -112,7 +115,7 @@ class RepaymentRecord:
 @dataclass(frozen=True, slots=True)
 class ParsedSource:
     signing: tuple[SigningRecord, ...]
-    repayment: tuple[RepaymentRecord, ...]
+    signing_sheet_name: str
 
 
 @dataclass(frozen=True, slots=True)
@@ -195,16 +198,37 @@ def _validate_source_identity(source: SourceWorkbook) -> None:
         raise SourceValidationError(f"{source.path.name}：源文件不存在")
 
 
-def _validate_headers(source: SourceWorkbook, workbook: Any) -> None:
-    missing = [
-        name
-        for name in (SIGNING_SOURCE_SHEET, REPAYMENT_SOURCE_SHEET)
-        if name not in workbook.sheetnames
-    ]
-    if missing:
-        raise _source_error(source, f"缺少工作表：{'、'.join(missing)}")
+def _select_signing_sheet_name(source: SourceWorkbook, workbook: Any) -> str:
+    """Select one signing worksheet using the confirmed name priority."""
 
-    signing = workbook[SIGNING_SOURCE_SHEET]
+    sheet_names = list(workbook.sheetnames)
+    if not sheet_names:
+        raise _source_error(source, "工作簿中没有工作表")
+    if len(sheet_names) == 1:
+        return sheet_names[0]
+
+    priorities = (
+        lambda name: name == "签约情况",
+        lambda name: name == "签约数据",
+        lambda name: "签约" in name and "情况" in name,
+        lambda name: "签约" in name and "数据" in name,
+    )
+    for matches in priorities:
+        for sheet_name in sheet_names:
+            if matches(sheet_name.strip()):
+                return sheet_name
+
+    available = "、".join(f"“{name}”" for name in sheet_names)
+    raise _source_error(
+        source,
+        "包含多个工作表，但未找到名称为“签约情况”“签约数据”或同时包含"
+        f"“签约”和“情况/数据”的工作表；现有工作表：{available}",
+    )
+
+
+def _validate_signing_headers(
+    source: SourceWorkbook, signing: Worksheet, sheet_name: str
+) -> None:
     signing_row2 = {
         "A": "组别",
         "B": "序号",
@@ -222,7 +246,7 @@ def _validate_headers(source: SourceWorkbook, workbook: Any) -> None:
             raise _source_error(
                 source,
                 f"表头不匹配，期望“{expected}”",
-                sheet=SIGNING_SOURCE_SHEET,
+                sheet=sheet_name,
                 row=2,
                 column=column,
             )
@@ -233,56 +257,15 @@ def _validate_headers(source: SourceWorkbook, workbook: Any) -> None:
             raise _source_error(
                 source,
                 f"月份表头不匹配，期望“{expected}”",
-                sheet=SIGNING_SOURCE_SHEET,
-                row=3,
-                column=column,
-            )
-
-    repayment = workbook[REPAYMENT_SOURCE_SHEET]
-    repayment_row2 = {
-        "A": "姓名",
-        "B": "收款主体",
-        "C": "付款主体",
-        "D": "产品",
-        "E": "合同日期",
-        "F": "合同总价",
-        "G": "居间费",
-        "H": "已回款-提成口（26年以前）",
-        "I": "已回款-提成口径（26年）",
-        "J": "已回款-提成口径总额",
-        "K": "待回款额",
-        "L": "已开发票金额",
-        "M": "已开票未回款",
-        "N": "回款比例",
-        "O": "税/运费",
-        "P": "预计剩余回款时间及金额",
-        "Q": "备注",
-        "R": "已回款-业绩口径(26年)",
-    }
-    for column, expected in repayment_row2.items():
-        actual = repayment[f"{column}2"].value
-        if _normalized_header(actual) != _normalized_header(expected):
-            raise _source_error(
-                source,
-                f"表头不匹配，期望“{expected}”",
-                sheet=REPAYMENT_SOURCE_SHEET,
-                row=2,
-                column=column,
-            )
-    for index in range(12):
-        column = get_column_letter(18 + index)
-        expected = f"{index + 1}月"
-        if _normalized_header(repayment[f"{column}3"].value) != expected:
-            raise _source_error(
-                source,
-                f"月份表头不匹配，期望“{expected}”",
-                sheet=REPAYMENT_SOURCE_SHEET,
+                sheet=sheet_name,
                 row=3,
                 column=column,
             )
 
 
-def _parse_signing(source: SourceWorkbook, sheet: Worksheet) -> tuple[SigningRecord, ...]:
+def _parse_signing(
+    source: SourceWorkbook, sheet: Worksheet, sheet_name: str
+) -> tuple[SigningRecord, ...]:
     records: list[SigningRecord] = []
     current_group: str | None = None
     for row in range(4, sheet.max_row + 1):
@@ -293,7 +276,7 @@ def _parse_signing(source: SourceWorkbook, sheet: Worksheet) -> tuple[SigningRec
                 raise _source_error(
                     source,
                     "组别必须是文本",
-                    sheet=SIGNING_SOURCE_SHEET,
+                    sheet=sheet_name,
                     row=row,
                     column="A",
                 )
@@ -305,7 +288,7 @@ def _parse_signing(source: SourceWorkbook, sheet: Worksheet) -> tuple[SigningRec
             raise _source_error(
                 source,
                 "存在业务内容但无法取得组别",
-                sheet=SIGNING_SOURCE_SHEET,
+                sheet=sheet_name,
                 row=row,
                 column="A",
             )
@@ -314,7 +297,7 @@ def _parse_signing(source: SourceWorkbook, sheet: Worksheet) -> tuple[SigningRec
             raise _source_error(
                 source,
                 "人员不能为空且必须是文本",
-                sheet=SIGNING_SOURCE_SHEET,
+                sheet=sheet_name,
                 row=row,
                 column="C",
             )
@@ -324,7 +307,7 @@ def _parse_signing(source: SourceWorkbook, sheet: Worksheet) -> tuple[SigningRec
                 raise _source_error(
                     source,
                     "签约金额必须是数值或空值",
-                    sheet=SIGNING_SOURCE_SHEET,
+                    sheet=sheet_name,
                     row=row,
                     column=get_column_letter(offset),
                 )
@@ -392,20 +375,25 @@ def _parse_source(source: SourceWorkbook) -> ParsedSource:
     except Exception as exc:
         raise _source_error(source, f"无法打开 XLSX：{exc}") from exc
     try:
-        _validate_headers(source, workbook)
+        signing_sheet_name = _select_signing_sheet_name(source, workbook)
+        signing_sheet = workbook[signing_sheet_name]
+        _validate_signing_headers(source, signing_sheet, signing_sheet_name)
         return ParsedSource(
-            signing=_parse_signing(source, workbook[SIGNING_SOURCE_SHEET]),
-            repayment=_parse_repayment(source, workbook[REPAYMENT_SOURCE_SHEET]),
+            signing=_parse_signing(source, signing_sheet, signing_sheet_name),
+            signing_sheet_name=signing_sheet_name,
         )
     finally:
         workbook.close()
 
 
-def validate_source_workbook(source: SourceWorkbook) -> tuple[int, int]:
-    """Validate one source and return its signing and repayment detail counts."""
+def validate_source_workbook(source: SourceWorkbook) -> SourceValidationResult:
+    """Validate one source and report its selected signing worksheet."""
 
     parsed = _parse_source(source)
-    return len(parsed.signing), len(parsed.repayment)
+    return SourceValidationResult(
+        signing_sheet_name=parsed.signing_sheet_name,
+        signing_detail_count=len(parsed.signing),
+    )
 
 
 def _capture_row_style(sheet: Worksheet, row: int, max_column: int) -> RowStyleSample:
@@ -732,15 +720,12 @@ def _write_repayment_sheet(
     return department
 
 
-def _validate_template(workbook: Any) -> tuple[Worksheet, Worksheet]:
-    missing = [
-        name
-        for name in (SIGNING_TARGET_SHEET, REPAYMENT_TARGET_SHEET)
-        if name not in workbook.sheetnames
-    ]
-    if missing:
-        raise TemplateValidationError(f"目标模板缺少工作表：{'、'.join(missing)}")
-    return workbook[SIGNING_TARGET_SHEET], workbook[REPAYMENT_TARGET_SHEET]
+def _validate_template(workbook: Any) -> Worksheet:
+    if SIGNING_TARGET_SHEET not in workbook.sheetnames:
+        raise TemplateValidationError(
+            f"目标模板缺少工作表：{SIGNING_TARGET_SHEET}"
+        )
+    return workbook[SIGNING_TARGET_SHEET]
 
 
 def _formula_scan(sheet: Worksheet, max_row: int, max_column: int) -> None:
@@ -822,7 +807,7 @@ def _restore_non_target_parts(
     non_target_roots = [
         part
         for name, part in sheet_parts.items()
-        if name not in {SIGNING_TARGET_SHEET, REPAYMENT_TARGET_SHEET}
+        if name != SIGNING_TARGET_SHEET
     ]
     with zipfile.ZipFile(template_path) as source_zip:
         preserved = _collect_related_parts(source_zip, non_target_roots)
@@ -843,22 +828,16 @@ def _verify_output(
     output_path: Path,
     *,
     signing_last_row: int,
-    repayment_last_row: int,
 ) -> None:
     workbook = load_workbook(output_path, data_only=False, read_only=False)
     try:
-        signing, repayment = _validate_template(workbook)
+        signing = _validate_template(workbook)
         _formula_scan(signing, signing_last_row, 20)
-        _formula_scan(repayment, repayment_last_row, 29)
-        for sheet, last_row in (
-            (signing, signing_last_row),
-            (repayment, repayment_last_row),
-        ):
-            for row in range(4, last_row + 1):
-                if sheet.row_dimensions[row].hidden:
-                    raise SalesAggregationError(
-                        f"{sheet.title} / 第 {row} 行：生成结果中存在隐藏行"
-                    )
+        for row in range(4, signing_last_row + 1):
+            if signing.row_dimensions[row].hidden:
+                raise SalesAggregationError(
+                    f"{signing.title} / 第 {row} 行：生成结果中存在隐藏行"
+                )
     finally:
         workbook.close()
 
@@ -893,50 +872,29 @@ def aggregate_sales_workbooks(
         raise SalesAggregationError("输出文件不得覆盖模板或任一源文件")
 
     signing_records: list[SigningRecord] = []
-    repayment_records: list[RepaymentRecord] = []
     for source in sources:
         parsed = _parse_source(source)
         signing_records.extend(parsed.signing)
-        repayment_records.extend(parsed.repayment)
     if not signing_records:
         raise SalesAggregationError("所有源文件均没有有效签约明细")
-    if not repayment_records:
-        raise SalesAggregationError("所有源文件均没有有效回款明细")
 
     signing_total = sum(
         (_as_decimal(value) for record in signing_records for value in record.months),
         Decimal(0),
     )
-    repayment_current_year_total = sum(
-        (_as_decimal(value) for record in repayment_records for value in record.months),
-        Decimal(0),
-    )
-    repayment_contract_total = sum(
-        (_as_decimal(record.values[5]) for record in repayment_records), Decimal(0)
-    )
-    repayment_prior_total = sum(
-        (_as_decimal(record.values[7]) for record in repayment_records), Decimal(0)
-    )
-    repayment_cumulative_total = repayment_prior_total + repayment_current_year_total
 
     try:
         workbook = load_workbook(template, data_only=False, read_only=False)
     except Exception as exc:
         raise TemplateValidationError(f"无法打开目标模板：{exc}") from exc
     try:
-        signing_sheet, repayment_sheet = _validate_template(workbook)
+        signing_sheet = _validate_template(workbook)
         signing_samples = _capture_signing_samples(signing_sheet)
-        repayment_samples = _capture_repayment_samples(repayment_sheet)
         _clear_business_area(signing_sheet)
-        _clear_business_area(repayment_sheet)
         signing_last_row = _write_signing_sheet(
             signing_sheet, signing_records, signing_samples
         )
-        repayment_last_row = _write_repayment_sheet(
-            repayment_sheet, repayment_records, repayment_samples
-        )
         _formula_scan(signing_sheet, signing_last_row, 20)
-        _formula_scan(repayment_sheet, repayment_last_row, 29)
         workbook.calculation.calcMode = "auto"
         workbook.calculation.fullCalcOnLoad = True
         workbook.calculation.forceFullCalc = True
@@ -950,7 +908,6 @@ def aggregate_sales_workbooks(
             _verify_output(
                 patched_temp,
                 signing_last_row=signing_last_row,
-                repayment_last_row=repayment_last_row,
             )
             os.replace(patched_temp, output)
         finally:
@@ -963,9 +920,5 @@ def aggregate_sales_workbooks(
         output_path=output,
         source_count=len(sources),
         signing_detail_count=len(signing_records),
-        repayment_detail_count=len(repayment_records),
         signing_total=signing_total,
-        repayment_current_year_total=repayment_current_year_total,
-        repayment_contract_total=repayment_contract_total,
-        repayment_cumulative_total=repayment_cumulative_total,
     )

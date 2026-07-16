@@ -16,3 +16,5 @@ SUB-YYYYMMDD-HHMMSS-messageid后8位_文档标题.xlsx
 ```
 
 所有下载先写入同目录 `.part` 临时文件，成功后才原子改名。残留 `.part` 表示中断或失败，应在排查后手动清理；不要提交它或任何真实销售数据。
+
+配置过管理员 `open_id` 后，可向机器人发送 `清空下载缓存`，删除 `inbox/`、`archive/` 和 `aggregation/output/` 中未被活动批次引用的文件。该命令不会删除 `aggregation/state/`、汇总模板、活动批次源文件或 `.gitkeep`；单个文件删除失败时会继续处理其余文件，并在回复中报告失败数。
