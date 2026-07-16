@@ -26,6 +26,8 @@ data/inbox/*
 !data/inbox/.gitkeep
 data/archive/*
 !data/archive/.gitkeep
+data/aggregation/*
+!data/aggregation/.gitkeep
 
 # Editors and operating systems
 .idea/

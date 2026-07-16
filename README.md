@@ -1,6 +1,6 @@
 # 飞书销售表格收件机器人
 
-这是一个 Python 3.11 飞书长连接机器人。它会接收聊天中直接上传的 Excel 附件，或用户发送的飞书 Sheets/Wiki 表格链接，并将可导出的表格安全保存到本地。
+这是一个 Python 3.11 飞书长连接机器人。它会接收聊天中直接上传的 Excel 附件，或用户发送的飞书 Sheets/Wiki 表格链接，校验并暂存销售数据文件，再按既定 SOP 生成签约、回款汇总 Excel 并发送回当前会话。
 
 ## 当前能力
 
@@ -12,8 +12,11 @@
 - 使用 `.part` 临时文件原子落盘，并对下载大小、文件名和错误日志做基础保护；
 - 私聊消息可直接处理；群聊只有直接 `@` 机器人时才处理，`@所有人` 不触发；
 - 使用进程锁避免重复启动监听器，并统一脱敏项目、Lark SDK 与 HTTP 日志。
+- 按“会话 + 发送人”维护独立的待汇总批次，上传时立即校验表结构和金额字段；
+- 使用 `汇总状态`、`汇总`、`清空汇总` 管理批次，并输出保留模板格式的 `.xlsx` 汇总文件；
+- 汇总签约明细、个人/小组/部门统计和回款明细、个人/部门统计，统一生成并重写计算公式。
 
-不包含 Excel 内容解析、数据清洗、数据库导入、Wiki 写入或 Web 管理界面。
+不包含数据库导入、Wiki 写入或 Web 管理界面。当前销售汇总只接受 SOP 规定的 `.xlsx` 工作簿结构。
 
 ## 目录结构
 
@@ -22,8 +25,10 @@
 ├── feishu_bot_listener.py    # 长连接入口与消息编排
 ├── config/                   # 环境配置、路径解析和目录初始化
 ├── clients/                  # 飞书 HTTP API、附件和表格链接处理
+├── services/                 # 销售工作簿校验、汇总和批次状态
 ├── data/inbox/               # 直接上传附件的本地收件箱（Git 忽略）
 ├── data/archive/             # 链接导出的归档目录（Git 忽略）
+├── data/aggregation/         # 批次状态和生成结果（Git 忽略）
 ├── logs/                     # 本地日志（Git 忽略）
 ├── tests/                    # 不访问真实飞书的 pytest 测试
 ├── docs/plans/               # 功能计划和执行记录
@@ -51,6 +56,8 @@ FEISHU_APP_SECRET=
 
 FEISHU_INBOX_DIR=./data/inbox
 FEISHU_ARCHIVE_DIR=./data/archive
+FEISHU_AGGREGATION_DIR=./data/aggregation
+FEISHU_SALES_TEMPLATE_PATH=./excel_file_example/汇总效果-合并版-2026年销售数据统计2.xlsx
 FEISHU_MAX_DOWNLOAD_BYTES=104857600
 LOG_LEVEL=INFO
 ```
@@ -60,6 +67,8 @@ LOG_LEVEL=INFO
 | `FEISHU_APP_ID` / `FEISHU_APP_SECRET` | 企业自建应用凭据。 |
 | `FEISHU_INBOX_DIR` | 直接 Excel 附件的收件目录，默认 `data/inbox/`。 |
 | `FEISHU_ARCHIVE_DIR` | Sheets/Wiki 链接导出目录，默认 `data/archive/`。 |
+| `FEISHU_AGGREGATION_DIR` | 待汇总批次状态和汇总结果目录，默认 `data/aggregation/`。 |
+| `FEISHU_SALES_TEMPLATE_PATH` | 必填的销售汇总模板 `.xlsx` 路径。 |
 | `FEISHU_MAX_DOWNLOAD_BYTES` | 单个附件或导出文件的本地上限，默认且最大为 100 MB。 |
 | `LOG_LEVEL` | `DEBUG`、`INFO`、`WARNING`、`ERROR` 或 `CRITICAL`。 |
 
@@ -68,6 +77,7 @@ LOG_LEVEL=INFO
 - 私聊和群聊均允许使用，但群聊消息必须直接 `@` 当前机器人；只 `@所有人` 不会触发处理。
 - 一条消息如果包含可下载的 Excel 附件，会优先走附件分支；仅在没有附件时识别文本中的第一个受支持 Sheets/Wiki 链接。
 - 当前进程通过异步锁串行执行附件下载和表格导出，避免多个文件任务同时写入本地。
+- 批次按聊天 ID 和发送人 ID 隔离；同一个飞书来源文件 ID 不会被重复加入批次，文件内容相同但来源不同的记录不会去重。
 - 启动后会持有 `logs/feishu_bot_listener.lock`。如果已有实例正在运行，新实例会立即报告启动失败；正常退出后锁会释放，锁文件本身可以保留。
 - 运行日志写入 `logs/feishu_bot_listener.log`。Lark SDK 和 HTTP 库的 URL 型 INFO 日志被抑制，已知 WebSocket 临时凭证会被替换为 `***`。
 
@@ -101,6 +111,14 @@ SUB-YYYYMMDD-HHMMSS-messageid后8位_文档标题.xlsx
 
 文件标题优先使用 Wiki 节点返回的 `title`；标题为空时，使用导出任务返回的文件名。归档目录和下载内容均被 Git 忽略，只有 `.gitkeep` 用于保留目录结构。
 
+## 销售汇总流程
+
+1. 依次发送或导出 `.xlsx` 销售文件。机器人校验 `Sheet1`（签约）和 `Sheet2`（回款），通过后按上传顺序加入当前批次。
+2. 发送 `汇总状态` 查看批次；发送 `清空汇总` 可清除当前批次，但不会删除已下载的源文件。
+3. 发送 `汇总`。机器人以 `FEISHU_SALES_TEMPLATE_PATH` 为模板，清空两个目标汇总表的旧业务内容，重新生成全部明细、统计行、合并单元格和公式，并把结果 Excel 发回会话。
+
+生成成功且文件发送成功后，当前批次才会清空；发生校验、生成或发送错误时会保留批次，便于修正后重试。详细字段规则以 [`excel_file_example/2026年销售数据汇总SOP.md`](excel_file_example/2026年销售数据汇总SOP.md) 为准。
+
 ## 飞书权限与节点授权
 
 除机器人长连接和消息资源下载所需权限外，表格链接导出至少需要申请：
@@ -126,6 +144,8 @@ wiki:wiki:readonly
 
 测试全部使用 fake/mock，不访问真实飞书、不使用真实凭据，也不会改动真实下载文件。
 
+当前完整基线：**57 项测试通过**。此外，已使用两份实验源文件生成并通过 Microsoft Excel 重算与可视检查的 [`自动汇总结果-实验1和实验2.xlsx`](excel_file_example/自动汇总结果-实验1和实验2.xlsx)。
+
 ## 工程协作与文档入口
 
 - [架构地图](ARCHITECTURE.md)：模块边界、依赖方向和两条数据流。
@@ -133,7 +153,8 @@ wiki:wiki:readonly
 - [功能计划目录说明](docs/plans/README.md)：计划的命名、状态和归档规则。
 - [本次表格链接导出计划](docs/plans/2026-07-14_feishu-table-link-export_plan.md)：已完成的实现记录与验收证据。
 - [监听器运行安全计划](docs/plans/2026-07-15_listener-runtime-safety_plan.md)：群聊准入、日志脱敏和单实例约束的验收记录。
+- [销售工作簿自动汇总计划](docs/plans/2026-07-15_sales-workbook-aggregation_plan.md)：本次 Excel 汇总实现和验收证据。
 - [版本日志](VersionLog.md)：业务、配置和工程规则的实质变更。
 - [Cursor 规则](.cursor/rules/project-workflow.mdc)：Plan/Agent 工作流；[`.cursorrules`](.cursorrules) 提供旧版兼容入口。
 
-目录级职责见 [`clients/README.md`](clients/README.md)、[`config/README.md`](config/README.md)、[`data/README.md`](data/README.md)、[`tests/README.md`](tests/README.md) 和 [`logs/README.md`](logs/README.md)。
+目录级职责见 [`clients/README.md`](clients/README.md)、[`services/README.md`](services/README.md)、[`config/README.md`](config/README.md)、[`data/README.md`](data/README.md)、[`tests/README.md`](tests/README.md) 和 [`logs/README.md`](logs/README.md)。

@@ -2,20 +2,22 @@
 
 ## 项目定位
 
-这是一个 Python 3.11 飞书机器人：接收直接上传的 Excel 附件，或解析飞书 Sheets/Wiki 链接并导出为 XLSX。本项目只负责安全落盘和处理结果回复，不读取 Excel 内容，也不进行数据清洗、汇总或入库。
+这是一个 Python 3.11 飞书机器人：接收直接上传的 Excel 附件，或解析飞书 Sheets/Wiki 链接并导出为 XLSX；校验销售工作簿后按会话批次汇总，并把生成的 XLSX 发回飞书。本项目不进行数据库入库。
 
 ## 模块边界与依赖方向
 
 | 模块 | 职责 | 允许依赖 |
 | --- | --- | --- |
-| `config` | 读取 `.env`、校验配置、创建日志/收件/归档目录。 | 标准库、`python-dotenv` |
+| `config` | 读取 `.env`、校验配置、创建日志/收件/归档/汇总目录。 | 标准库、`python-dotenv` |
 | `clients.feishu_client` | tenant token 缓存、飞书 HTTP 请求、Wiki 查询、导出任务和二进制下载。 | `config`、`requests`、标准库 |
 | `clients.feishu_attachment` | 解析文件消息、校验 Excel 后缀、生成收件箱安全文件名。 | 标准库、消息资源下载协议 |
 | `clients.feishu_table_export` | 识别表格链接、解析 Wiki 真实对象、生成归档路径。 | `feishu_client` 的导出协议、标准库 |
-| `feishu_bot_listener.py` | 配置消息准入、日志和单实例锁，创建长连接、串行编排并把结果转换为用户回复。 | `config`、`clients`、`lark-channel-sdk` |
+| `services.sales_workbook_aggregator` | 校验源工作簿，按 SOP 重建签约和回款目标表，校验控制总额并原子保存。 | `openpyxl`、标准库 |
+| `services.aggregation_batch_store` | 按聊天和发送人持久化批次、上传顺序和已处理来源 ID。 | 标准库 |
+| `feishu_bot_listener.py` | 配置消息准入、日志和单实例锁，创建长连接、串行编排并把结果或文件转换为飞书回复。 | `config`、`clients`、`services`、`lark-channel-sdk` |
 | `tests` | 使用 fake/mock 验证配置、API 参数、解析、归档和回复。 | 被测模块、`pytest` |
 
-依赖必须单向：`config` 不依赖 `clients`；`clients` 不依赖监听器；监听器只编排，不放入 HTTP、链接解析或文件命名细节。
+依赖必须单向：`config` 不依赖 `clients`/`services`；`clients` 和 `services` 不依赖监听器；监听器只编排，不放入 HTTP、链接解析、汇总算法或文件命名细节。
 
 ## 运行数据流
 
@@ -40,8 +42,26 @@
            -> POST /drive/v1/export_tasks (file_extension=xlsx)
            -> 轮询导出任务并下载 file_token
            -> data/archive/YYYY-MM/sender_open_id/SUB-..._<title>.xlsx
+       -> services.sales_workbook_aggregator.validate_source_workbook()
+       -> services.aggregation_batch_store（chat_id + sender_open_id 隔离）
+       -> 用户命令：汇总状态 | 清空汇总 | 汇总
+       -> aggregate_sales_workbooks()
+            -> 清空模板中的两个目标业务表
+            -> 按上传顺序重建明细、统计、合并单元格与公式
+            -> 控制总额和公式结构校验
+            -> data/aggregation/output/YYYY-MM/<owner-hash>/...xlsx
+       -> 飞书文件回复；成功后清空当前批次
   -> 飞书回复 + logs/feishu_bot_listener.log
 ```
+
+## Excel 汇总约束
+
+- 只接收 `.xlsx`；源表必须包含 SOP 规定的 `Sheet1`、`Sheet2` 表头和字段类型。
+- 来源 ID 用于防止同一文件重复加入批次；业务明细不按姓名或内容去重，相同内容的不同来源记录会全部保留。
+- 模板中只重建签约汇总表和回款汇总表，其他工作表及其 OOXML 关系、图片等部件原样保留。
+- 签约按来源顺序和首次出现顺序输出明细、个人、小组、部门统计；回款输出明细、个人小计和部门总计。
+- 公式统一生成，回款剩余金额使用 `F-J`，允许负数；控制总额使用独立的 `Decimal` 计算核对。
+- 输出先写临时文件，重开校验公式、隐藏行和目标表结构后再原子替换正式文件。
 
 ## 表格链接导出约束
 
@@ -61,8 +81,8 @@
 
 ## 运行产物与安全
 
-- `.env`、日志、`logs/*.lock`、`data/inbox/` 实际附件和 `data/archive/` 实际导出文件都不得提交到 Git。
-- `data/inbox/.gitkeep` 和 `data/archive/.gitkeep` 仅保存目录结构。
+- `.env`、日志、`logs/*.lock`、`data/inbox/` 实际附件、`data/archive/` 实际导出文件和 `data/aggregation/` 状态/结果都不得提交到 Git。
+- `data/inbox/.gitkeep`、`data/archive/.gitkeep` 和 `data/aggregation/.gitkeep` 仅保存目录结构。
 - 日志和异常必须脱敏，不输出 App Secret、完整 tenant token、完整文件内容或业务数据。
 - 飞书开放平台 API Scope 与具体 Wiki 节点/文档共享权限是独立条件；两者都满足才能解析和导出 Wiki 表格。
 

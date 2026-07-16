@@ -70,6 +70,7 @@ class DownloadedTableExport:
     bytes_written: int
     document_type: str
     title: str
+    source_file_id: str
 
 
 def _value(source: object, name: str) -> Any:
@@ -285,4 +286,17 @@ class FeishuTableLinkExporter:
             bytes_written=bytes_written,
             document_type=document_type,
             title=title,
+            source_file_id=f"{_message_id(message)}:{document_type}:{document_token}",
         )
+
+
+def message_sender_open_id(message: object) -> str:
+    """Return the sender identity used to isolate aggregation batches."""
+
+    return _sender_open_id(message)
+
+
+def message_texts(message: object) -> list[str]:
+    """Return normalized text candidates for listener command recognition."""
+
+    return _message_texts(message)

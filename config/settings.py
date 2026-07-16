@@ -16,11 +16,13 @@ DEFAULT_ENV_FILE = PROJECT_ROOT / ".env"
 REQUIRED_ENV_VARS = (
     "FEISHU_APP_ID",
     "FEISHU_APP_SECRET",
+    "FEISHU_SALES_TEMPLATE_PATH",
 )
 
 VALID_LOG_LEVELS = {"CRITICAL", "ERROR", "WARNING", "INFO", "DEBUG"}
 DEFAULT_INBOX_DIR = "./data/inbox"
 DEFAULT_ARCHIVE_DIR = "./data/archive"
+DEFAULT_AGGREGATION_DIR = "./data/aggregation"
 MAX_MESSAGE_RESOURCE_BYTES = 100 * 1024 * 1024
 
 
@@ -39,6 +41,8 @@ class Settings:
     archive_dir: Path
     max_download_bytes: int
     log_level: str
+    aggregation_dir: Path = Path("./data/aggregation")
+    sales_template_path: Path = Path("./template.xlsx")
 
 
 def _read_values(
@@ -136,6 +140,15 @@ def load_settings(
     inbox_dir = _resolve_project_path(inbox_value or DEFAULT_INBOX_DIR, root)
     archive_value = values.get("FEISHU_ARCHIVE_DIR", DEFAULT_ARCHIVE_DIR).strip()
     archive_dir = _resolve_project_path(archive_value or DEFAULT_ARCHIVE_DIR, root)
+    aggregation_value = values.get(
+        "FEISHU_AGGREGATION_DIR", DEFAULT_AGGREGATION_DIR
+    ).strip()
+    aggregation_dir = _resolve_project_path(
+        aggregation_value or DEFAULT_AGGREGATION_DIR, root
+    )
+    sales_template_path = _resolve_project_path(
+        required["FEISHU_SALES_TEMPLATE_PATH"], root
+    )
     max_download_raw = values.get(
         "FEISHU_MAX_DOWNLOAD_BYTES", str(MAX_MESSAGE_RESOURCE_BYTES)
     ).strip()
@@ -145,6 +158,7 @@ def load_settings(
         log_dir.mkdir(parents=True, exist_ok=True)
         inbox_dir.mkdir(parents=True, exist_ok=True)
         archive_dir.mkdir(parents=True, exist_ok=True)
+        aggregation_dir.mkdir(parents=True, exist_ok=True)
     except OSError as exc:
         raise ConfigurationError(f"无法创建本地运行目录：{exc}") from exc
 
@@ -154,6 +168,8 @@ def load_settings(
         log_dir=log_dir,
         inbox_dir=inbox_dir,
         archive_dir=archive_dir,
+        aggregation_dir=aggregation_dir,
+        sales_template_path=sales_template_path,
         max_download_bytes=max_download_bytes,
         log_level=log_level,
     )

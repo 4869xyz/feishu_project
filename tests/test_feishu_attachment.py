@@ -86,6 +86,7 @@ def test_downloads_excel_into_safe_message_specific_name(project_tmp_dir: Path) 
     assert result.path.name == "om_message_123__财务汇总.xlsx"
     assert result.path.read_bytes() == b"excel-bytes"
     assert result.already_present is False
+    assert result.source_file_id == "om_message_123:file_abc"
     assert client.calls == [("om_message_123", "file_abc", result.path, 1024)]
 
 

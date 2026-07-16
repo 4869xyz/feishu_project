@@ -15,6 +15,7 @@ def _valid_environment() -> dict[str, str]:
     return {
         "FEISHU_APP_ID": "cli_test",
         "FEISHU_APP_SECRET": "test-secret-value",
+        "FEISHU_SALES_TEMPLATE_PATH": "./template.xlsx",
         "LOG_LEVEL": "debug",
     }
 
@@ -32,6 +33,10 @@ def test_load_settings_from_environment(project_tmp_dir: Path) -> None:
     assert settings.app_secret == "test-secret-value"
     assert settings.inbox_dir == (project_tmp_dir / "data" / "inbox").resolve()
     assert settings.archive_dir == (project_tmp_dir / "data" / "archive").resolve()
+    assert settings.aggregation_dir == (
+        project_tmp_dir / "data" / "aggregation"
+    ).resolve()
+    assert settings.sales_template_path == (project_tmp_dir / "template.xlsx").resolve()
     assert settings.max_download_bytes == 100 * 1024 * 1024
     assert settings.log_level == "DEBUG"
 
@@ -66,6 +71,7 @@ def test_all_missing_environment_variables_are_reported(
     message = str(exc_info.value)
     assert "FEISHU_APP_ID" in message
     assert "FEISHU_APP_SECRET" in message
+    assert "FEISHU_SALES_TEMPLATE_PATH" in message
 
 
 def test_runtime_directories_are_created(project_tmp_dir: Path) -> None:
@@ -85,6 +91,7 @@ def test_runtime_directories_are_created(project_tmp_dir: Path) -> None:
     assert settings.inbox_dir.is_dir()
     assert settings.archive_dir == (project_tmp_dir / "custom-archive").resolve()
     assert settings.archive_dir.is_dir()
+    assert settings.aggregation_dir.is_dir()
     assert settings.log_dir == (project_tmp_dir / "logs").resolve()
     assert settings.log_dir.is_dir()
 
@@ -112,6 +119,7 @@ def test_dotenv_values_are_loaded_and_environment_wins(project_tmp_dir: Path) ->
             [
                 "FEISHU_APP_ID=cli_from_file",
                 "FEISHU_APP_SECRET=secret_from_file",
+                "FEISHU_SALES_TEMPLATE_PATH=./template.xlsx",
                 "FEISHU_INBOX_DIR=./dotenv-inbox",
                 "LOG_LEVEL=INFO",
             ]

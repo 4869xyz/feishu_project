@@ -50,6 +50,7 @@ class DownloadedAttachment:
     path: Path
     bytes_written: int
     already_present: bool
+    source_file_id: str
 
 
 def _value(source: object, name: str) -> Any:
@@ -199,6 +200,7 @@ class ExcelAttachmentDownloader:
                 path=destination,
                 bytes_written=destination.stat().st_size,
                 already_present=True,
+                source_file_id=f"{file_message.message_id}:{file_message.file_key}",
             )
 
         bytes_written = self.client.download_message_resource(
@@ -211,4 +213,5 @@ class ExcelAttachmentDownloader:
             path=destination,
             bytes_written=bytes_written,
             already_present=False,
+            source_file_id=f"{file_message.message_id}:{file_message.file_key}",
         )

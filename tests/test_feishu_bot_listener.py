@@ -3,7 +3,9 @@
 from __future__ import annotations
 
 import asyncio
+from decimal import Decimal
 import logging
+from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
@@ -18,6 +20,8 @@ from feishu_bot_listener import (
     _single_instance_lock,
     handle_message,
 )
+from services.aggregation_batch_store import AggregationBatchStore
+from services.sales_workbook_aggregator import AggregationResult, SourceWorkbook
 
 
 class StubAttachmentDownloader:
@@ -151,3 +155,93 @@ def test_single_instance_lock_rejects_second_owner(project_tmp_dir) -> None:
 
     with _single_instance_lock(lock_path):
         pass
+
+
+def test_aggregation_command_returns_xlsx_and_clears_batch(
+    project_tmp_dir: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The explicit command aggregates the staged order and replies with a file."""
+
+    channel = RecordingChannel()
+    message = SimpleNamespace(
+        chat_id="oc_chat",
+        message_id="om_command",
+        sender_open_id="ou_sender",
+        content_text="汇总",
+    )
+    source_path = project_tmp_dir / "source.xlsx"
+    source_path.write_bytes(b"source")
+    store = AggregationBatchStore(project_tmp_dir / "aggregation")
+    store.add_source(
+        "oc_chat",
+        "ou_sender",
+        SourceWorkbook("source-id", source_path),
+        display_name="销售.xlsx",
+    )
+
+    def fake_aggregate(sources, template_path, output_path):
+        Path(output_path).write_bytes(b"xlsx-result")
+        return AggregationResult(
+            output_path=Path(output_path),
+            source_count=len(sources),
+            signing_detail_count=2,
+            repayment_detail_count=1,
+            signing_total=Decimal(100),
+            repayment_current_year_total=Decimal(20),
+            repayment_contract_total=Decimal(30),
+            repayment_cumulative_total=Decimal(20),
+        )
+
+    monkeypatch.setattr("feishu_bot_listener.aggregate_sales_workbooks", fake_aggregate)
+    asyncio.run(
+        handle_message(
+            channel,
+            StubAttachmentDownloader(),
+            PermissionDeniedExporter(),
+            message,
+            asyncio.Lock(),
+            batch_store=store,
+            sales_template_path=project_tmp_dir / "template.xlsx",
+        )
+    )
+
+    assert "file" in channel.calls[0][1]
+    assert channel.calls[0][1]["file"]["source"].endswith(".xlsx")
+    assert "汇总完成" in channel.calls[1][1]["text"]
+    assert store.list_sources("oc_chat", "ou_sender") == ()
+
+
+def test_aggregation_status_is_isolated_by_sender(project_tmp_dir: Path) -> None:
+    """A sender only sees files in their own batch inside a shared chat."""
+
+    channel = RecordingChannel()
+    source_path = project_tmp_dir / "source.xlsx"
+    source_path.write_bytes(b"source")
+    store = AggregationBatchStore(project_tmp_dir / "aggregation")
+    store.add_source(
+        "oc_chat",
+        "ou_other",
+        SourceWorkbook("source-id", source_path),
+        display_name="其他人的销售.xlsx",
+    )
+    message = SimpleNamespace(
+        chat_id="oc_chat",
+        message_id="om_status",
+        sender_open_id="ou_sender",
+        content_text="汇总状态",
+    )
+
+    asyncio.run(
+        handle_message(
+            channel,
+            StubAttachmentDownloader(),
+            PermissionDeniedExporter(),
+            message,
+            asyncio.Lock(),
+            batch_store=store,
+            sales_template_path=project_tmp_dir / "template.xlsx",
+        )
+    )
+
+    assert channel.calls[-1][1]["text"] == "当前汇总批次为空。请先上传销售 XLSX 文件。"

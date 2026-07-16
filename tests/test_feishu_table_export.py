@@ -116,6 +116,7 @@ def test_sheet_link_exports_using_its_own_token_and_archive_convention(
 
     assert result is not None
     assert result.document_type == "sheet"
+    assert result.source_file_id == "om_abcdefgh:sheet:sht_sales_001"
     assert result.path == (
         project_tmp_dir
         / "data"
