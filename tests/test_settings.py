@@ -3,10 +3,11 @@
 from __future__ import annotations
 
 from pathlib import Path
+import sys
 
 import pytest
 
-from config.settings import ConfigurationError, load_settings
+from config.settings import ConfigurationError, _runtime_project_root, load_settings
 
 
 def _valid_environment() -> dict[str, str]:
@@ -18,6 +19,19 @@ def _valid_environment() -> dict[str, str]:
         "FEISHU_SALES_TEMPLATE_PATH": "./template.xlsx",
         "LOG_LEVEL": "debug",
     }
+
+
+def test_runtime_project_root_uses_frozen_executable_directory(
+    monkeypatch: pytest.MonkeyPatch,
+    project_tmp_dir: Path,
+) -> None:
+    """A packaged executable resolves .env and runtime data beside itself."""
+
+    executable = project_tmp_dir / "FeishuSalesBot.exe"
+    monkeypatch.setattr(sys, "frozen", True, raising=False)
+    monkeypatch.setattr(sys, "executable", str(executable))
+
+    assert _runtime_project_root() == project_tmp_dir.resolve()
 
 
 def test_load_settings_from_environment(project_tmp_dir: Path) -> None:

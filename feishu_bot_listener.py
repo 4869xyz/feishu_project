@@ -243,12 +243,17 @@ def _registered_source_command(message: object) -> tuple[str, str] | None:
     for cleaned in _clean_message_texts(message):
         if cleaned == "云表列表":
             return "list", ""
+        if cleaned == "清空云表":
+            return "clear", ""
         add_match = re.fullmatch(r"添加云表(?:\s+|[:：])?(.*)", cleaned)
         if add_match:
             return "add", add_match.group(1).strip()
         remove_match = re.fullmatch(r"移除云表(?:\s+|[:：])?(.*)", cleaned)
         if remove_match:
             return "remove", remove_match.group(1).strip()
+        reorder_match = re.fullmatch(r"云表排序(?:\s+|[:：])?(.*)", cleaned)
+        if reorder_match:
+            return "reorder", reorder_match.group(1).strip()
     return None
 
 
@@ -308,15 +313,49 @@ def _registered_sources_text(
     """Format persistent sources for a compact user-facing list."""
 
     return "\n".join(
-        f"{index}. {item.source_id}｜{item.display_name}｜最近刷新 {item.last_success_at}"
+        f"{index}. {item.display_name}｜最近刷新 {item.last_success_at}"
         for index, item in enumerate(sources, 1)
     )
 
 
-def _refresh_error(source: RegisteredCloudSource, exc: Exception) -> str:
+def _registered_source_by_reference(
+    sources: tuple[RegisteredCloudSource, ...], reference: str
+) -> RegisteredCloudSource | None:
+    """Resolve a current list number or a legacy internal source ID."""
+
+    normalized = reference.strip()
+    if normalized.isdecimal():
+        position = int(normalized)
+        if 1 <= position <= len(sources):
+            return sources[position - 1]
+        return None
+    lowered = normalized.lower()
+    return next(
+        (item for item in sources if item.source_id.lower() == lowered),
+        None,
+    )
+
+
+def _parse_registered_order(argument: str, source_count: int) -> tuple[int, ...]:
+    """Parse a complete one-based source permutation."""
+
+    parts = [part for part in re.split(r"[\s,，]+", argument.strip()) if part]
+    if not parts or any(not part.isdecimal() for part in parts):
+        raise ValueError("排序编号必须是数字")
+    positions = tuple(int(part) for part in parts)
+    if len(positions) != source_count or set(positions) != set(
+        range(1, source_count + 1)
+    ):
+        raise ValueError(f"请完整填写 1 到 {source_count}，且每个编号只能出现一次")
+    return positions
+
+
+def _refresh_error(
+    source: RegisteredCloudSource, position: int, exc: Exception
+) -> str:
     """Return a bounded source-specific refresh failure explanation."""
 
-    prefix = f"{source.display_name}（{source.source_id}）"
+    prefix = f"{source.display_name}（编号 {position}）"
     if isinstance(exc, WikiTablePermissionError):
         return f"{prefix}：机器人已失去 Wiki 节点或导出权限"
     if isinstance(exc, UnsupportedFeishuTableLink):
@@ -335,7 +374,7 @@ async def _handle_registered_source_command(
     batch_store: AggregationBatchStore,
     table_exporter: FeishuTableLinkExporter,
 ) -> None:
-    """Register, list, or remove one sender's persistent cloud sources."""
+    """Register, list, remove, clear, or reorder persistent cloud sources."""
 
     chat_id, sender_open_id = _batch_identity(message)
     async with download_lock:
@@ -364,16 +403,19 @@ async def _handle_registered_source_command(
                     "请发送“移除云表 <编号>”，编号可通过“云表列表”查看。",
                 )
                 return
-            removed = batch_store.remove_registered_source(
-                chat_id, sender_open_id, argument
-            )
-            if removed is None:
+            selected = _registered_source_by_reference(registered, argument)
+            if selected is None:
                 await _reply(
                     channel,
                     message,
                     f"未找到固定云表：{argument}。请先发送“云表列表”核对编号。",
                 )
                 return
+            removed = batch_store.remove_registered_source(
+                chat_id, sender_open_id, selected.source_id
+            )
+            if removed is None:
+                raise RuntimeError("固定云表状态在删除时发生变化")
             cache_path = batch_store.registered_cache_path(
                 chat_id,
                 sender_open_id,
@@ -390,8 +432,68 @@ async def _handle_registered_source_command(
             await _reply(
                 channel,
                 message,
-                f"已移除固定云表：{removed.display_name}（{removed.source_id}）。",
+                f"已移除固定云表：{removed.display_name}。其余云表已按当前顺序重新编号。",
             )
+            return
+
+        if action == "reorder":
+            if not registered:
+                await _reply(channel, message, "当前没有固定云表，无需排序。")
+                return
+            try:
+                positions = _parse_registered_order(argument, len(registered))
+            except ValueError as exc:
+                example = " ".join(
+                    str(index) for index in range(len(registered), 0, -1)
+                )
+                await _reply(
+                    channel,
+                    message,
+                    f"云表排序未执行：{exc}。例如：云表排序 {example}",
+                )
+                return
+            reordered = batch_store.reorder_registered_sources(
+                chat_id,
+                sender_open_id,
+                tuple(registered[position - 1].source_id for position in positions),
+            )
+            await _reply(
+                channel,
+                message,
+                f"云表顺序已更新：\n{_registered_sources_text(reordered)}",
+            )
+            return
+
+        if action == "clear":
+            if not registered:
+                await _reply(channel, message, "当前没有固定云表。")
+                return
+            removed_sources = batch_store.clear_registered_sources(
+                chat_id, sender_open_id
+            )
+            failed_cache_deletions = 0
+            for removed in removed_sources:
+                cache_path = batch_store.registered_cache_path(
+                    chat_id,
+                    sender_open_id,
+                    removed.kind,
+                    removed.token,
+                )
+                try:
+                    cache_path.unlink(missing_ok=True)
+                except OSError:
+                    failed_cache_deletions += 1
+                    LOGGER.warning(
+                        "固定云表已清空但缓存删除失败：source_id=%s",
+                        removed.source_id,
+                    )
+            reply = f"已清空 {len(removed_sources)} 份固定云表。"
+            if failed_cache_deletions:
+                reply += (
+                    f"另有 {failed_cache_deletions} 份本地缓存删除失败，"
+                    "但不会再参与汇总。"
+                )
+            await _reply(channel, message, reply)
             return
 
         link = extract_feishu_table_link(message)
@@ -408,10 +510,11 @@ async def _handle_registered_source_command(
             None,
         )
         if duplicate is not None:
+            duplicate_number = registered.index(duplicate) + 1
             await _reply(
                 channel,
                 message,
-                f"该云表已经登记：{duplicate.display_name}（{duplicate.source_id}）。",
+                f"该云表已经登记：{duplicate.display_name}（编号 {duplicate_number}）。",
             )
             return
 
@@ -439,7 +542,7 @@ async def _handle_registered_source_command(
             channel,
             message,
             f"固定云表已登记（共 {result.registered_count} 份）："
-            f"{result.source.display_name}（{result.source.source_id}）。"
+            f"{result.source.display_name}（编号 {result.registered_count}）。"
             "以后发送“汇总”时会先重新获取最新数据。",
         )
 
@@ -496,7 +599,7 @@ async def _refresh_registered_workbooks(
     """Refresh registered sources sequentially and return their latest workbooks."""
 
     refreshed: list[SourceWorkbook] = []
-    for item in registered:
+    for position, item in enumerate(registered, 1):
         link = FeishuTableLink(kind=item.kind, token=item.token, url=item.url)
         try:
             exported, latest_path = await asyncio.to_thread(
@@ -516,7 +619,9 @@ async def _refresh_registered_workbooks(
             ValueError,
             WikiTablePermissionError,
         ) as exc:
-            raise RegisteredSourceRefreshError(_refresh_error(item, exc)) from exc
+            raise RegisteredSourceRefreshError(
+                _refresh_error(item, position, exc)
+            ) from exc
         batch_store.update_registered_source(
             chat_id,
             sender_open_id,

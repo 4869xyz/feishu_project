@@ -199,3 +199,62 @@ def test_registered_sources_persist_update_remove_and_isolate_owner(
     assert [item.source_id for item in store.list_registered_sources("chat", "sender")] == [
         first.source.source_id
     ]
+
+
+def test_registered_sources_can_be_reordered_and_cleared_without_touching_temporary(
+    project_tmp_dir: Path,
+) -> None:
+    """A complete order persists and clearing fixed sources preserves temporary ones."""
+
+    store = AggregationBatchStore(project_tmp_dir / "aggregation")
+    registered = []
+    for index in range(1, 4):
+        token = f"sht_{index}"
+        cache_path = store.registered_cache_path(
+            "chat", "sender", "sheets", token
+        )
+        cache_path.parent.mkdir(parents=True, exist_ok=True)
+        cache_path.write_bytes(str(index).encode("ascii"))
+        registered.append(
+            store.add_registered_source(
+                "chat",
+                "sender",
+                kind="sheets",
+                token=token,
+                url=f"https://example.feishu.cn/sheets/{token}",
+                display_name=f"{index}号表",
+                cached_path=cache_path,
+                refreshed_at=f"2026-07-20T10:0{index}:00",
+            ).source
+        )
+    temporary_path = project_tmp_dir / "temporary.xlsx"
+    temporary_path.write_bytes(b"temporary")
+    store.add_source(
+        "chat",
+        "sender",
+        SourceWorkbook("temporary-id", temporary_path),
+        display_name="临时.xlsx",
+    )
+
+    reordered = store.reorder_registered_sources(
+        "chat",
+        "sender",
+        (
+            registered[2].source_id,
+            registered[0].source_id,
+            registered[1].source_id,
+        ),
+    )
+
+    assert [item.display_name for item in reordered] == ["3号表", "1号表", "2号表"]
+    assert [
+        item.display_name for item in store.list_registered_sources("chat", "sender")
+    ] == ["3号表", "1号表", "2号表"]
+    assert store.list_registered_sources("chat", "other") == ()
+
+    removed = store.clear_registered_sources("chat", "sender")
+
+    assert [item.display_name for item in removed] == ["3号表", "1号表", "2号表"]
+    assert store.list_registered_sources("chat", "sender") == ()
+    assert len(store.list_sources("chat", "sender")) == 1
+    assert store.clear_registered_sources("chat", "sender") == ()

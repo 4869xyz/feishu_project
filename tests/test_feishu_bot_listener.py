@@ -322,7 +322,10 @@ def test_registered_cloud_source_command_lifecycle(
     assert len(registered) == 1
     assert registered[0].display_name == "固定销售表"
     assert registered[0].cached_path.read_bytes() == b"fresh-xlsx"
-    assert "固定云表已登记" in channel.calls[-1][1]["text"]
+    add_reply = channel.calls[-1][1]["text"]
+    assert "固定云表已登记" in add_reply
+    assert "编号 1" in add_reply
+    assert registered[0].source_id not in add_reply
 
     list_message = SimpleNamespace(
         chat_id="oc_chat",
@@ -341,13 +344,15 @@ def test_registered_cloud_source_command_lifecycle(
             sales_template_path=project_tmp_dir / "template.xlsx",
         )
     )
-    assert registered[0].source_id in channel.calls[-1][1]["text"]
+    list_reply = channel.calls[-1][1]["text"]
+    assert "1. 固定销售表" in list_reply
+    assert registered[0].source_id not in list_reply
 
     remove_message = SimpleNamespace(
         chat_id="oc_chat",
         message_id="om_remove",
         sender_open_id="ou_sender",
-        content_text=f"移除云表 {registered[0].source_id}",
+        content_text="移除云表 1",
     )
     asyncio.run(
         handle_message(
@@ -363,6 +368,183 @@ def test_registered_cloud_source_command_lifecycle(
     assert store.list_registered_sources("oc_chat", "ou_sender") == ()
     assert registered[0].cached_path.exists() is False
     assert "已移除固定云表" in channel.calls[-1][1]["text"]
+
+
+def test_registered_cloud_sources_reorder_validate_and_clear(
+    project_tmp_dir: Path,
+) -> None:
+    """Numbers represent current order and clear leaves temporary files untouched."""
+
+    channel = RecordingChannel()
+    store = AggregationBatchStore(project_tmp_dir / "aggregation")
+    caches: list[Path] = []
+    for index in range(1, 4):
+        token = f"sht_{index}"
+        cache_path = store.registered_cache_path(
+            "oc_chat", "ou_sender", "sheets", token
+        )
+        cache_path.parent.mkdir(parents=True, exist_ok=True)
+        cache_path.write_bytes(f"cache-{index}".encode("ascii"))
+        caches.append(cache_path)
+        store.add_registered_source(
+            "oc_chat",
+            "ou_sender",
+            kind="sheets",
+            token=token,
+            url=f"https://example.feishu.cn/sheets/{token}",
+            display_name=f"{index}号表",
+            cached_path=cache_path,
+            refreshed_at=f"2026-07-20T10:0{index}:00",
+        )
+    temporary_path = project_tmp_dir / "temporary.xlsx"
+    temporary_path.write_bytes(b"temporary")
+    store.add_source(
+        "oc_chat",
+        "ou_sender",
+        SourceWorkbook("temporary-id", temporary_path),
+        display_name="临时.xlsx",
+    )
+
+    def send(command: str, message_id: str) -> None:
+        asyncio.run(
+            handle_message(
+                channel,
+                StubAttachmentDownloader(),
+                PermissionDeniedExporter(),
+                SimpleNamespace(
+                    chat_id="oc_chat",
+                    message_id=message_id,
+                    sender_open_id="ou_sender",
+                    content_text=command,
+                ),
+                asyncio.Lock(),
+                batch_store=store,
+                sales_template_path=project_tmp_dir / "template.xlsx",
+            )
+        )
+
+    send("云表排序 3 3 1", "om_invalid_order")
+    assert "云表排序未执行" in channel.calls[-1][1]["text"]
+    assert [
+        item.display_name
+        for item in store.list_registered_sources("oc_chat", "ou_sender")
+    ] == ["1号表", "2号表", "3号表"]
+
+    send("云表排序 3 1 2", "om_order")
+    assert "云表顺序已更新" in channel.calls[-1][1]["text"]
+    assert [
+        item.display_name
+        for item in store.list_registered_sources("oc_chat", "ou_sender")
+    ] == ["3号表", "1号表", "2号表"]
+    assert "1. 3号表" in channel.calls[-1][1]["text"]
+
+    send("清空云表", "om_clear")
+    assert channel.calls[-1][1]["text"] == "已清空 3 份固定云表。"
+    assert store.list_registered_sources("oc_chat", "ou_sender") == ()
+    assert len(store.list_sources("oc_chat", "ou_sender")) == 1
+    assert all(not cache.exists() for cache in caches)
+
+    send("清空云表", "om_clear_again")
+    assert channel.calls[-1][1]["text"] == "当前没有固定云表。"
+
+
+def test_remove_registered_cloud_source_accepts_legacy_internal_id(
+    project_tmp_dir: Path,
+) -> None:
+    """Previously documented cloud IDs remain accepted during transition."""
+
+    channel = RecordingChannel()
+    store = AggregationBatchStore(project_tmp_dir / "aggregation")
+    cache_path = store.registered_cache_path(
+        "oc_chat", "ou_sender", "sheets", "sht_legacy"
+    )
+    cache_path.parent.mkdir(parents=True, exist_ok=True)
+    cache_path.write_bytes(b"cache")
+    registered = store.add_registered_source(
+        "oc_chat",
+        "ou_sender",
+        kind="sheets",
+        token="sht_legacy",
+        url="https://example.feishu.cn/sheets/sht_legacy",
+        display_name="旧编号云表",
+        cached_path=cache_path,
+        refreshed_at="2026-07-20T10:00:00",
+    ).source
+
+    asyncio.run(
+        handle_message(
+            channel,
+            StubAttachmentDownloader(),
+            PermissionDeniedExporter(),
+            SimpleNamespace(
+                chat_id="oc_chat",
+                message_id="om_remove_legacy",
+                sender_open_id="ou_sender",
+                content_text=f"移除云表 {registered.source_id}",
+            ),
+            asyncio.Lock(),
+            batch_store=store,
+            sales_template_path=project_tmp_dir / "template.xlsx",
+        )
+    )
+
+    assert store.list_registered_sources("oc_chat", "ou_sender") == ()
+    assert "已移除固定云表" in channel.calls[-1][1]["text"]
+
+
+def test_clear_registered_cloud_sources_reports_cache_delete_failure(
+    project_tmp_dir: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A failed local unlink does not restore a cleared cloud registration."""
+
+    channel = RecordingChannel()
+    store = AggregationBatchStore(project_tmp_dir / "aggregation")
+    cache_path = store.registered_cache_path(
+        "oc_chat", "ou_sender", "sheets", "sht_locked"
+    )
+    cache_path.parent.mkdir(parents=True, exist_ok=True)
+    cache_path.write_bytes(b"cache")
+    store.add_registered_source(
+        "oc_chat",
+        "ou_sender",
+        kind="sheets",
+        token="sht_locked",
+        url="https://example.feishu.cn/sheets/sht_locked",
+        display_name="缓存被占用的云表",
+        cached_path=cache_path,
+        refreshed_at="2026-07-20T10:00:00",
+    )
+    original_unlink = Path.unlink
+
+    def fail_latest_unlink(path: Path, *, missing_ok: bool = False) -> None:
+        if path.resolve() == cache_path.resolve():
+            raise PermissionError("cache is in use")
+        original_unlink(path, missing_ok=missing_ok)
+
+    monkeypatch.setattr(Path, "unlink", fail_latest_unlink)
+    asyncio.run(
+        handle_message(
+            channel,
+            StubAttachmentDownloader(),
+            PermissionDeniedExporter(),
+            SimpleNamespace(
+                chat_id="oc_chat",
+                message_id="om_clear_locked",
+                sender_open_id="ou_sender",
+                content_text="清空云表",
+            ),
+            asyncio.Lock(),
+            batch_store=store,
+            sales_template_path=project_tmp_dir / "template.xlsx",
+        )
+    )
+
+    assert store.list_registered_sources("oc_chat", "ou_sender") == ()
+    assert cache_path.exists()
+    reply = channel.calls[-1][1]["text"]
+    assert "1 份本地缓存删除失败" in reply
+    assert "不会再参与汇总" in reply
 
 
 def test_aggregation_refreshes_registered_sources_before_temporary_files(

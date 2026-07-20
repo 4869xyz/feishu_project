@@ -328,6 +328,43 @@ class AggregationBatchStore:
             return removed
         return None
 
+    def reorder_registered_sources(
+        self,
+        chat_id: str,
+        sender_open_id: str,
+        source_ids: tuple[str, ...],
+    ) -> tuple[RegisteredCloudSource, ...]:
+        """Persist one owner's complete registered-source order."""
+
+        state = self._load(chat_id, sender_open_id)
+        registered = state["registered_sources"]
+        current_ids = [str(item.get("source_id", "")) for item in registered]
+        requested_ids = [source_id.strip() for source_id in source_ids]
+        if len(requested_ids) != len(current_ids) or set(requested_ids) != set(
+            current_ids
+        ):
+            raise ValueError("云表排序必须完整包含当前所有固定云表且不能重复")
+        by_id = {str(item["source_id"]): item for item in registered}
+        state["registered_sources"] = [by_id[source_id] for source_id in requested_ids]
+        self._save(chat_id, sender_open_id, state)
+        return tuple(
+            self._registered_from_item(item) for item in state["registered_sources"]
+        )
+
+    def clear_registered_sources(
+        self, chat_id: str, sender_open_id: str
+    ) -> tuple[RegisteredCloudSource, ...]:
+        """Remove all of one owner's registered sources and return their metadata."""
+
+        state = self._load(chat_id, sender_open_id)
+        removed = tuple(
+            self._registered_from_item(item) for item in state["registered_sources"]
+        )
+        if removed:
+            state["registered_sources"] = []
+            self._save(chat_id, sender_open_id, state)
+        return removed
+
     def all_active_source_paths(self) -> frozenset[Path]:
         """Return every active or registered source path protected from cleanup."""
 

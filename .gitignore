@@ -19,6 +19,12 @@ tests_runtime/
 .coverage
 htmlcov/
 
+# Local Windows packaging and secret-bearing release artifacts
+build/
+dist/
+release/
+*.spec.tmp
+
 # Runtime logs and downloaded attachments
 logs/*.log
 logs/*.lock

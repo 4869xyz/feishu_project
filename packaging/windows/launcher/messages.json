@@ -1,0 +1,15 @@
+{
+  "title": "飞书销售汇总机器人",
+  "start_success_title": "启动成功",
+  "start_success": "机器人已在后台启动。现在可以打开飞书并与机器人对话。",
+  "already_running": "机器人已经在后台运行，可以直接打开飞书使用。",
+  "incomplete_package": "程序文件不完整，请重新解压发布包。",
+  "start_failed_title": "机器人启动失败",
+  "start_failed": "机器人未能启动。请打开“查看运行日志”排查。",
+  "stop_success_title": "停止成功",
+  "stop_success": "机器人已经停止。",
+  "not_running": "机器人当前没有运行。",
+  "stop_failed_title": "停止失败",
+  "pid_mismatch": "运行记录与机器人程序不匹配，未停止任何进程。",
+  "no_logs": "还没有运行日志，请先启动机器人。"
+}

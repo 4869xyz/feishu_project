@@ -6,11 +6,20 @@ import os
 from collections.abc import Mapping
 from dataclasses import dataclass, field
 from pathlib import Path
+import sys
 
 from dotenv import dotenv_values, load_dotenv
 
 
-PROJECT_ROOT = Path(__file__).resolve().parents[1]
+def _runtime_project_root() -> Path:
+    """Return the source root or the directory containing a frozen executable."""
+
+    if getattr(sys, "frozen", False):
+        return Path(sys.executable).resolve().parent
+    return Path(__file__).resolve().parents[1]
+
+
+PROJECT_ROOT = _runtime_project_root()
 DEFAULT_ENV_FILE = PROJECT_ROOT / ".env"
 
 REQUIRED_ENV_VARS = (

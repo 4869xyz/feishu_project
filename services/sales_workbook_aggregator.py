@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from collections import OrderedDict
+import colorsys
 from copy import copy
 from dataclasses import dataclass
 from decimal import Decimal
@@ -17,6 +18,7 @@ import xml.etree.ElementTree as ET
 import zipfile
 
 from openpyxl import load_workbook
+from openpyxl.styles.colors import COLOR_INDEX
 from openpyxl.utils import get_column_letter
 from openpyxl.worksheet.worksheet import Worksheet
 
@@ -54,7 +56,34 @@ XML_DOC_REL_NS = (
     "http://schemas.openxmlformats.org/officeDocument/2006/relationships"
 )
 XML_MAIN_NS = "http://schemas.openxmlformats.org/spreadsheetml/2006/main"
+XML_DRAWING_NS = "http://schemas.openxmlformats.org/drawingml/2006/main"
 SHARED_STRINGS_REL_TYPE = f"{XML_DOC_REL_NS}/sharedStrings"
+THEME_COLOR_KEYS = (
+    "lt1",
+    "dk1",
+    "lt2",
+    "dk2",
+    "accent1",
+    "accent2",
+    "accent3",
+    "accent4",
+    "accent5",
+    "accent6",
+    "hlink",
+    "folHlink",
+)
+YELLOW_ORANGE_HUE_MIN = 20.0
+YELLOW_ORANGE_HUE_MAX = 70.0
+CHROMATIC_SATURATION_MIN = 0.15
+CHROMATIC_VALUE_MIN = 0.35
+SIGNING_HIDE_COLOR_COLUMNS = range(3, 8)
+SIGNING_AMOUNT_COLUMNS = range(9, 21)
+SIGNING_ACCOUNTING_FORMAT = (
+    r'_(* #,##0.0_);_(* \(#,##0.0\);_(* "-"??_);_(@_)'
+)
+SIGNING_AMOUNT_MIN_WIDTH = 12.0
+SIGNING_AMOUNT_WIDTH_PADDING = 4
+EXCEL_MAX_COLUMN_WIDTH = 255.0
 
 
 class SalesAggregationError(RuntimeError):
@@ -113,6 +142,7 @@ class SigningRecord:
     values: tuple[Any, ...]
     font_colors: tuple[Any, ...]
     months: tuple[Any, ...]
+    hide_in_output: bool
 
 
 @dataclass(frozen=True, slots=True)
@@ -151,6 +181,15 @@ class SigningStyleSamples:
     department_year: RowStyleSample
     person_spacer: RowStyleSample
     group_spacer: RowStyleSample
+
+
+@dataclass(frozen=True, slots=True)
+class SigningWriteResult:
+    """Generated signing boundary and the exact detail rows expected to be hidden."""
+
+    last_row: int
+    hidden_detail_rows: frozenset[int]
+    amount_column_widths: tuple[float, ...]
 
 
 @dataclass(frozen=True, slots=True)
@@ -289,12 +328,127 @@ def _validate_signing_headers(
             )
 
 
+def _rgb_tuple(value: Any) -> tuple[int, int, int] | None:
+    """Normalize one six/eight-digit RGB value to an RGB tuple."""
+
+    if not isinstance(value, str):
+        return None
+    normalized = value.strip().lstrip("#")
+    if len(normalized) == 8:
+        normalized = normalized[-6:]
+    if len(normalized) != 6 or re.fullmatch(r"[0-9A-Fa-f]{6}", normalized) is None:
+        return None
+    return tuple(int(normalized[index : index + 2], 16) for index in (0, 2, 4))
+
+
+def _theme_rgb_palette(workbook: Any) -> tuple[tuple[int, int, int] | None, ...]:
+    """Resolve spreadsheet theme indexes to base RGB colors."""
+
+    payload = getattr(workbook, "loaded_theme", None)
+    if not payload:
+        return tuple(None for _ in THEME_COLOR_KEYS)
+    try:
+        root = ET.fromstring(payload)
+        scheme = root.find(f".//{{{XML_DRAWING_NS}}}clrScheme")
+    except (ET.ParseError, TypeError, ValueError):
+        scheme = None
+    by_name: dict[str, tuple[int, int, int] | None] = {}
+    if scheme is not None:
+        for node in scheme:
+            name = node.tag.rsplit("}", 1)[-1]
+            children = list(node)
+            if not children:
+                continue
+            color_node = children[0]
+            value = color_node.get("lastClr") or color_node.get("val")
+            by_name[name] = _rgb_tuple(value)
+    return tuple(by_name.get(name) for name in THEME_COLOR_KEYS)
+
+
+def _apply_color_tint(
+    rgb: tuple[int, int, int], tint: float
+) -> tuple[int, int, int]:
+    """Apply an OOXML tint to one RGB color for hue classification."""
+
+    if not tint:
+        return rgb
+    red, green, blue = (component / 255 for component in rgb)
+    hue, lightness, saturation = colorsys.rgb_to_hls(red, green, blue)
+    if tint < 0:
+        lightness *= 1 + tint
+    else:
+        lightness = lightness * (1 - tint) + tint
+    tinted = colorsys.hls_to_rgb(
+        hue,
+        max(0.0, min(1.0, lightness)),
+        saturation,
+    )
+    return tuple(round(component * 255) for component in tinted)
+
+
+def _font_color_rgb(
+    color: Any,
+    theme_palette: tuple[tuple[int, int, int] | None, ...],
+) -> tuple[int, int, int] | None:
+    """Resolve a static openpyxl font color to its displayed RGB approximation."""
+
+    if color is None:
+        return None
+    color_type = getattr(color, "type", None)
+    rgb: tuple[int, int, int] | None = None
+    if color_type == "rgb":
+        rgb = _rgb_tuple(getattr(color, "rgb", None))
+    elif color_type == "indexed":
+        indexed = getattr(color, "indexed", None)
+        if isinstance(indexed, int) and 0 <= indexed < len(COLOR_INDEX):
+            rgb = _rgb_tuple(COLOR_INDEX[indexed])
+    elif color_type == "theme":
+        theme = getattr(color, "theme", None)
+        if isinstance(theme, int) and 0 <= theme < len(theme_palette):
+            rgb = theme_palette[theme]
+    if rgb is None:
+        return None
+    tint = getattr(color, "tint", 0.0)
+    return _apply_color_tint(rgb, float(tint or 0.0))
+
+
+def _font_color_is_yellow_or_orange(
+    color: Any,
+    theme_palette: tuple[tuple[int, int, int] | None, ...],
+) -> bool:
+    """Return whether one static font color is visibly yellow or orange."""
+
+    rgb = _font_color_rgb(color, theme_palette)
+    if rgb is None:
+        return False
+    hue, saturation, value = colorsys.rgb_to_hsv(
+        *(component / 255 for component in rgb)
+    )
+    if saturation < CHROMATIC_SATURATION_MIN or value < CHROMATIC_VALUE_MIN:
+        return False
+    degrees = hue * 360
+    return YELLOW_ORANGE_HUE_MIN <= degrees <= YELLOW_ORANGE_HUE_MAX
+
+
+def _signing_key_fields_have_yellow_or_orange(
+    colors: Sequence[Any],
+    theme_palette: tuple[tuple[int, int, int] | None, ...],
+) -> bool:
+    """Check personnel and business identity fields C:G for a warm marker color."""
+
+    return any(
+        _font_color_is_yellow_or_orange(colors[column - 1], theme_palette)
+        for column in SIGNING_HIDE_COLOR_COLUMNS
+    )
+
+
 def _parse_signing(
     source: SourceWorkbook, sheet: Worksheet, sheet_name: str
 ) -> tuple[SigningRecord, ...]:
     records: list[SigningRecord] = []
     current_group: str | None = None
     current_group_font_color: Any = None
+    theme_palette = _theme_rgb_palette(sheet.parent)
     for row in range(4, sheet.max_row + 1):
         values = tuple(sheet.cell(row, column).value for column in range(1, 21))
         if _is_signing_summary_row(values):
@@ -343,9 +497,13 @@ def _parse_signing(
                     column=get_column_letter(offset),
                 )
         output_values = (current_group, *values[1:])
-        font_colors = [
+        raw_font_colors = [
             copy(sheet.cell(row, column).font.color) for column in range(1, 21)
         ]
+        hide_in_output = _signing_key_fields_have_yellow_or_orange(
+            raw_font_colors, theme_palette
+        )
+        font_colors = list(raw_font_colors)
         if _is_blank(group_value):
             font_colors[0] = copy(current_group_font_color)
         records.append(
@@ -358,6 +516,7 @@ def _parse_signing(
                 values=tuple(output_values),
                 font_colors=tuple(font_colors),
                 months=tuple(months),
+                hide_in_output=hide_in_output,
             )
         )
     return tuple(records)
@@ -458,6 +617,39 @@ def _apply_font_color(cell: Any, color: Any) -> None:
     font = copy(cell.font)
     font.color = copy(color)
     cell.font = font
+
+
+def _apply_signing_amount_format(sheet: Worksheet, row: int) -> None:
+    """Apply one-decimal, symbol-free accounting format to signing I:T."""
+
+    for column in SIGNING_AMOUNT_COLUMNS:
+        sheet.cell(row, column).number_format = SIGNING_ACCOUNTING_FORMAT
+
+
+def _autofit_signing_amount_columns(
+    sheet: Worksheet, records: Sequence[SigningRecord]
+) -> tuple[float, ...]:
+    """Expand I:T for the longest possible one-decimal accounting amount."""
+
+    widths: list[float] = []
+    for month_index, column in enumerate(SIGNING_AMOUNT_COLUMNS):
+        absolute_total = sum(
+            (abs(_as_decimal(record.months[month_index])) for record in records),
+            Decimal(0),
+        )
+        displayed = f"{absolute_total:,.1f}"
+        required = float(len(displayed) + SIGNING_AMOUNT_WIDTH_PADDING)
+        letter = get_column_letter(column)
+        dimension = sheet.column_dimensions[letter]
+        template_width = float(dimension.width or 0)
+        width = min(
+            EXCEL_MAX_COLUMN_WIDTH,
+            max(SIGNING_AMOUNT_MIN_WIDTH, template_width, required),
+        )
+        dimension.width = width
+        dimension.bestFit = True
+        widths.append(width)
+    return tuple(widths)
 
 
 def _find_label_row(sheet: Worksheet, column: int, label: str) -> int:
@@ -586,6 +778,9 @@ def _write_month_quarter_year(
     sheet.cell(month_row, 2).value = labels[0]
     sheet.cell(quarter_row, 2).value = labels[1]
     sheet.cell(year_row, 2).value = labels[2]
+    _apply_signing_amount_format(sheet, month_row)
+    _apply_signing_amount_format(sheet, quarter_row)
+    _apply_signing_amount_format(sheet, year_row)
 
     if isinstance(month_formula_rows, tuple):
         start, end = month_formula_rows
@@ -625,12 +820,13 @@ def _write_signing_sheet(
     sheet: Worksheet,
     records: Sequence[SigningRecord],
     samples: SigningStyleSamples,
-) -> int:
+) -> SigningWriteResult:
     grouped: OrderedDict[str, OrderedDict[str, list[SigningRecord]]] = OrderedDict()
     for record in records:
         grouped.setdefault(record.group, OrderedDict()).setdefault(record.person, []).append(record)
 
     row = 4
+    hidden_detail_rows: set[int] = set()
     group_month_rows: list[int] = []
     groups = list(grouped.items())
     for group_index, (group, people) in enumerate(groups):
@@ -647,6 +843,10 @@ def _write_signing_sheet(
                     cell = sheet.cell(row, column)
                     cell.value = value
                     _apply_font_color(cell, font_color)
+                _apply_signing_amount_format(sheet, row)
+                if record.hide_in_output:
+                    sheet.row_dimensions[row].hidden = True
+                    hidden_detail_rows.add(row)
                 row += 1
             detail_end = row - 1
 
@@ -720,7 +920,12 @@ def _write_signing_sheet(
             SIGNING_DEPT_QUARTER,
             SIGNING_DEPT_YEAR,
         )[target_row - department_month]
-    return department_month + 2
+    amount_column_widths = _autofit_signing_amount_columns(sheet, records)
+    return SigningWriteResult(
+        last_row=department_month + 2,
+        hidden_detail_rows=frozenset(hidden_detail_rows),
+        amount_column_widths=amount_column_widths,
+    )
 
 
 def _write_repayment_sheet(
@@ -919,16 +1124,42 @@ def _verify_output(
     output_path: Path,
     *,
     signing_last_row: int,
+    expected_hidden_rows: frozenset[int],
+    expected_amount_column_widths: tuple[float, ...],
 ) -> None:
     workbook = load_workbook(output_path, data_only=False, read_only=False)
     try:
         signing = _validate_template(workbook)
         _formula_scan(signing, signing_last_row, 20)
-        for row in range(4, signing_last_row + 1):
-            if signing.row_dimensions[row].hidden:
+        for column, expected_width in zip(
+            SIGNING_AMOUNT_COLUMNS, expected_amount_column_widths
+        ):
+            dimension = signing.column_dimensions[get_column_letter(column)]
+            if not dimension.bestFit or abs(dimension.width - expected_width) > 0.01:
                 raise SalesAggregationError(
-                    f"{signing.title} / 第 {row} 行：生成结果中存在隐藏行"
+                    f"{signing.title} / {get_column_letter(column)} 列："
+                    "金额列自适应宽度未正确保存"
                 )
+        for row in range(4, signing_last_row + 1):
+            actual_hidden = bool(signing.row_dimensions[row].hidden)
+            expected_hidden = row in expected_hidden_rows
+            if actual_hidden != expected_hidden:
+                expected_text = "隐藏" if expected_hidden else "可见"
+                raise SalesAggregationError(
+                    f"{signing.title} / 第 {row} 行：生成结果行可见性错误，"
+                    f"期望{expected_text}"
+                )
+            for column in SIGNING_AMOUNT_COLUMNS:
+                cell = signing.cell(row, column)
+                value = cell.value
+                is_formula = isinstance(value, str) and value.startswith("=")
+                if (_is_numeric(value) or is_formula) and (
+                    cell.number_format != SIGNING_ACCOUNTING_FORMAT
+                ):
+                    raise SalesAggregationError(
+                        f"{signing.title} / {cell.coordinate}：金额格式错误，"
+                        "期望会计专用一位小数且无货币符号"
+                    )
     finally:
         workbook.close()
 
@@ -982,10 +1213,10 @@ def aggregate_sales_workbooks(
         signing_sheet = _validate_template(workbook)
         signing_samples = _capture_signing_samples(signing_sheet)
         _clear_business_area(signing_sheet)
-        signing_last_row = _write_signing_sheet(
+        signing_write = _write_signing_sheet(
             signing_sheet, signing_records, signing_samples
         )
-        _formula_scan(signing_sheet, signing_last_row, 20)
+        _formula_scan(signing_sheet, signing_write.last_row, 20)
         workbook.calculation.calcMode = "auto"
         workbook.calculation.fullCalcOnLoad = True
         workbook.calculation.forceFullCalc = True
@@ -998,7 +1229,9 @@ def aggregate_sales_workbooks(
             _restore_non_target_parts(template, raw_temp, patched_temp)
             _verify_output(
                 patched_temp,
-                signing_last_row=signing_last_row,
+                signing_last_row=signing_write.last_row,
+                expected_hidden_rows=signing_write.hidden_detail_rows,
+                expected_amount_column_widths=signing_write.amount_column_widths,
             )
             os.replace(patched_temp, output)
         finally:

@@ -8,10 +8,14 @@ from pathlib import Path
 import pytest
 from openpyxl import Workbook, load_workbook
 from openpyxl.styles import Color, Font, PatternFill
+from openpyxl.writer.theme import theme_xml
 
 from services.sales_workbook_aggregator import (
     DuplicateSourceError,
     SalesAggregationError,
+    SIGNING_ACCOUNTING_FORMAT,
+    SIGNING_AMOUNT_MIN_WIDTH,
+    SIGNING_AMOUNT_WIDTH_PADDING,
     SourceValidationError,
     SourceWorkbook,
     aggregate_sales_workbooks,
@@ -545,12 +549,316 @@ def test_detail_cells_preserve_source_font_colors_only(
         == template_sheet["C4"].alignment.horizontal
     )
     assert output_sheet["C4"].border.left.style == template_sheet["C4"].border.left.style
-    assert output_sheet["I4"].number_format == template_sheet["I4"].number_format
+    assert output_sheet["I4"].number_format == SIGNING_ACCOUNTING_FORMAT
+    assert output_sheet["I4"].number_format != template_sheet["I4"].number_format
 
     # The generated personal total uses the template sample, never the ignored source total.
     assert _font_color_signature(output_sheet["B6"]) == ("rgb", "FF0070C0", 0.0)
     output_workbook.close()
     template_workbook.close()
+
+
+def test_signing_amounts_use_symbol_free_accounting_with_one_decimal(
+    project_tmp_dir: Path,
+) -> None:
+    """Detail and summary amounts share one accounting format without changing values."""
+
+    template = project_tmp_dir / "template.xlsx"
+    source = project_tmp_dir / "accounting-source.xlsx"
+    output = project_tmp_dir / "output.xlsx"
+    _make_template(template)
+    _make_source(
+        source,
+        [
+            _source_row(
+                group="甲组",
+                sequence=1,
+                person="同一人",
+                note="格式验证",
+                months=(1234, 0, -12.34, None),
+            )
+        ],
+        signing_sheet_name="签约数据",
+    )
+    workbook = load_workbook(source)
+    sheet = workbook["签约数据"]
+    sheet["C4"].font = Font(color=Color(rgb="FFED7D31"))
+    sheet["I4"].number_format = "0.000"
+    workbook.save(source)
+    workbook.close()
+
+    result = aggregate_sales_workbooks(
+        [SourceWorkbook("accounting", source)], template, output
+    )
+
+    assert result.signing_total == Decimal("1221.66")
+    workbook = load_workbook(output, data_only=False)
+    sheet = workbook[SIGNING_TARGET]
+    assert (sheet["I4"].value, sheet["J4"].value, sheet["K4"].value, sheet["L4"].value) == (
+        1234,
+        0,
+        -12.34,
+        None,
+    )
+    assert sheet.row_dimensions[4].hidden is True
+    assert all(
+        sheet.cell(4, column).number_format == SIGNING_ACCOUNTING_FORMAT
+        for column in range(9, 21)
+    )
+    for row in range(4, sheet.max_row + 1):
+        for column in range(9, 21):
+            cell = sheet.cell(row, column)
+            is_formula = isinstance(cell.value, str) and cell.value.startswith("=")
+            if isinstance(cell.value, (int, float)) or is_formula:
+                assert cell.number_format == SIGNING_ACCOUNTING_FORMAT
+    assert sheet["I5"].value == "=SUM(I4:I4)"
+    assert sheet["I6"].value == "=SUM(I5:K5)"
+    assert sheet["I7"].value == "=SUM(I5:T5)"
+    assert sheet["I8"].value is None
+    assert sheet["I8"].number_format != SIGNING_ACCOUNTING_FORMAT
+    assert "$" not in SIGNING_ACCOUNTING_FORMAT
+    assert "¥" not in SIGNING_ACCOUNTING_FORMAT
+    assert "0.0" in SIGNING_ACCOUNTING_FORMAT
+    workbook.close()
+
+
+def test_signing_amount_columns_expand_independently_for_displayed_values(
+    project_tmp_dir: Path,
+) -> None:
+    """I:T retain a template floor and expand per month for large accounting values."""
+
+    template = project_tmp_dir / "template.xlsx"
+    source = project_tmp_dir / "wide-amounts.xlsx"
+    output = project_tmp_dir / "output.xlsx"
+    _make_template(template)
+    workbook = load_workbook(template)
+    sheet = workbook[SIGNING_TARGET]
+    sheet.column_dimensions["I"].width = 8
+    sheet.column_dimensions["J"].width = 9
+    sheet.column_dimensions["K"].width = 25
+    workbook.save(template)
+    workbook.close()
+    _make_source(
+        source,
+        [
+            _source_row(
+                group="甲组",
+                sequence=1,
+                person="A",
+                months=(1, 1234567890.1, -9876543.2),
+            ),
+            _source_row(
+                sequence=2,
+                person="A",
+                months=(2, 2000000000.2, 0),
+            ),
+        ],
+        signing_sheet_name="签约数据",
+    )
+
+    aggregate_sales_workbooks(
+        [SourceWorkbook("wide-amounts", source)], template, output
+    )
+
+    workbook = load_workbook(output, data_only=False)
+    sheet = workbook[SIGNING_TARGET]
+    expected_j = float(len(f"{Decimal('3234567890.3'):,.1f}") + SIGNING_AMOUNT_WIDTH_PADDING)
+    assert sheet.column_dimensions["I"].width == SIGNING_AMOUNT_MIN_WIDTH
+    assert sheet.column_dimensions["J"].width == expected_j
+    assert sheet.column_dimensions["J"].width > sheet.column_dimensions["I"].width
+    assert sheet.column_dimensions["K"].width == 25
+    for column in "IJKLMNOPQRST":
+        dimension = sheet.column_dimensions[column]
+        assert dimension.bestFit is True
+        assert dimension.width >= SIGNING_AMOUNT_MIN_WIDTH
+    workbook.close()
+
+
+def test_yellow_orange_key_fields_hide_rows_without_losing_data_or_totals(
+    project_tmp_dir: Path,
+) -> None:
+    """Warm key fields hide rows while month-only yellow and summaries stay visible."""
+
+    template = project_tmp_dir / "template.xlsx"
+    source = project_tmp_dir / "yellow-rows.xlsx"
+    output = project_tmp_dir / "output.xlsx"
+    _make_template(template)
+    rows = [
+        _source_row(
+            group="甲组" if index == 1 else None,
+            sequence=index,
+            person="同一人",
+            note=f"明细{index}",
+            months=(index,),
+        )
+        for index in range(1, 14)
+    ]
+    _make_source(source, rows, signing_sheet_name="签约数据")
+
+    workbook = load_workbook(source)
+    sheet = workbook["签约数据"]
+    solid_rows = {
+        4: "FFFFC000",
+        5: "FFFFC60A",
+        6: "FFF2BA02",
+        7: "FFB8860B",
+        8: "FFFFF2CC",
+        12: "FF000000",
+        13: "FF00B050",
+        14: "FF3370FF",
+        15: "FF000000",
+        16: "FF000000",
+    }
+    for row, color in solid_rows.items():
+        for column in range(1, 21):
+            sheet.cell(row, column).font = Font(color=Color(rgb=color))
+    for column in range(1, 21):
+        sheet.cell(9, column).font = Font(
+            color=Color(rgb="FFFFC000" if column <= 11 else "FFC00000")
+        )
+        sheet.cell(10, column).font = Font(
+            color=Color(rgb="FFFFC000" if column <= 9 else "FFC00000")
+        )
+        sheet.cell(11, column).font = Font(
+            color=Color(rgb="FFFFC000" if column <= 10 else "FFC00000")
+        )
+        if column >= 9:
+            sheet.cell(15, column).font = Font(color=Color(rgb="FFFFC000"))
+    sheet["G16"].font = Font(color=Color(rgb="FFED7D31"))
+    workbook.save(source)
+    workbook.close()
+
+    result = aggregate_sales_workbooks(
+        [SourceWorkbook("yellow-family", source)], template, output
+    )
+
+    assert result.signing_detail_count == 13
+    assert result.signing_total == Decimal(91)
+    workbook = load_workbook(output, data_only=False)
+    sheet = workbook[SIGNING_TARGET]
+    hidden_rows = {
+        row for row in range(4, sheet.max_row + 1) if sheet.row_dimensions[row].hidden
+    }
+    assert hidden_rows == {4, 5, 6, 7, 8, 9, 10, 11, 16}
+    assert sheet["C4"].value == "同一人"
+    assert sheet["H4"].value == "明细1"
+    assert sheet["I4"].value == 1
+    assert _font_color_signature(sheet["C4"]) == ("rgb", "FFFFC000", 0.0)
+    assert sheet.row_dimensions[15].hidden is False
+    assert sheet["I17"].value == "=SUM(I4:I16)"
+    assert all(not sheet.row_dimensions[row].hidden for row in range(17, 28))
+    sheet.row_dimensions[4].hidden = False
+    assert sheet["C4"].value == "同一人"
+    assert sheet["I4"].value == 1
+    workbook.close()
+
+
+def test_each_c_to_g_key_field_can_trigger_hiding_but_other_columns_cannot(
+    project_tmp_dir: Path,
+) -> None:
+    """C:G are the exact warm-color trigger boundary for one signing detail row."""
+
+    template = project_tmp_dir / "template.xlsx"
+    source = project_tmp_dir / "key-field-colors.xlsx"
+    output = project_tmp_dir / "output.xlsx"
+    _make_template(template)
+    _make_source(
+        source,
+        [
+            _source_row(
+                group="甲组" if index == 1 else None,
+                sequence=index,
+                person="同一人",
+                months=(index,),
+            )
+            for index in range(1, 8)
+        ],
+        signing_sheet_name="签约数据",
+    )
+
+    workbook = load_workbook(source)
+    sheet = workbook["签约数据"]
+    for row in range(4, 11):
+        for column in range(1, 21):
+            sheet.cell(row, column).font = Font(color=Color(rgb="FF000000"))
+    key_colors = ("FFFFC000", "FFFFC60A", "FFF2BA02", "FFED7D31", "FFF4B183")
+    for row, (column, color) in enumerate(zip(range(3, 8), key_colors), start=4):
+        sheet.cell(row, column).font = Font(color=Color(rgb=color))
+    sheet["H9"].font = Font(color=Color(rgb="FFED7D31"))
+    sheet["I10"].font = Font(color=Color(rgb="FFFFC000"))
+    workbook.save(source)
+    workbook.close()
+
+    aggregate_sales_workbooks(
+        [SourceWorkbook("key-field-colors", source)], template, output
+    )
+
+    workbook = load_workbook(output, data_only=False)
+    sheet = workbook[SIGNING_TARGET]
+    hidden_rows = {
+        row for row in range(4, sheet.max_row + 1) if sheet.row_dimensions[row].hidden
+    }
+    assert hidden_rows == {4, 5, 6, 7, 8}
+    assert sheet.row_dimensions[9].hidden is False
+    assert sheet.row_dimensions[10].hidden is False
+    workbook.close()
+
+
+def test_theme_indexed_and_tinted_yellow_fonts_are_hidden(
+    project_tmp_dir: Path,
+) -> None:
+    """Static theme/indexed yellow resolves while auto, missing, blue, and red stay visible."""
+
+    template = project_tmp_dir / "template.xlsx"
+    source = project_tmp_dir / "encoded-colors.xlsx"
+    output = project_tmp_dir / "output.xlsx"
+    _make_template(template)
+    _make_source(
+        source,
+        [
+            _source_row(
+                group="甲组" if index == 1 else None,
+                sequence=index,
+                person="同一人",
+                months=(index,),
+            )
+            for index in range(1, 8)
+        ],
+        signing_sheet_name="签约情况",
+    )
+
+    workbook = load_workbook(source)
+    workbook.loaded_theme = theme_xml.replace(
+        'val="8064A2"', 'val="FFC000"'
+    ).encode("utf-8")
+    sheet = workbook["签约情况"]
+    encoded_colors = {
+        4: Color(theme=7, tint=0.25),
+        5: Color(indexed=5),
+        6: Color(theme=7, tint=-0.25),
+        7: Color(theme=4),
+        8: Color(indexed=2),
+        9: Color(auto=True),
+        10: None,
+    }
+    for row, color in encoded_colors.items():
+        for column in range(1, 21):
+            sheet.cell(row, column).font = Font(color=color)
+    workbook.save(source)
+    workbook.close()
+
+    aggregate_sales_workbooks(
+        [SourceWorkbook("encoded-colors", source)], template, output
+    )
+
+    workbook = load_workbook(output, data_only=False)
+    sheet = workbook[SIGNING_TARGET]
+    hidden_rows = {
+        row for row in range(4, sheet.max_row + 1) if sheet.row_dimensions[row].hidden
+    }
+    assert hidden_rows == {4, 5, 6}
+    assert all(not sheet.row_dimensions[row].hidden for row in range(7, sheet.max_row + 1))
+    workbook.close()
 
 
 def test_inherited_group_keeps_group_header_font_color(project_tmp_dir: Path) -> None:
