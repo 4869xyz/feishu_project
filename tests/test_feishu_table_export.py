@@ -16,6 +16,7 @@ from clients.feishu_table_export import (
     UnsupportedFeishuTableLink,
     WikiTablePermissionError,
     extract_feishu_table_link,
+    extract_feishu_table_links,
 )
 
 
@@ -96,6 +97,24 @@ def test_extract_feishu_table_link_excludes_query_and_fragment(
     assert result is not None
     assert result.kind == kind
     assert result.token == token
+
+
+def test_extract_feishu_table_links_preserves_order_and_removes_duplicates() -> None:
+    """A command can carry mixed Sheets/Wiki URLs separated by whitespace."""
+
+    sheets_url = "https://example.feishu.cn/sheets/sht_first?sheet=abc"
+    wiki_url = "https://example.feishu.cn/wiki/wik_second#section"
+    message = _message(
+        f"添加云表\n{sheets_url}\n{wiki_url} {sheets_url}，"
+    )
+
+    links = extract_feishu_table_links(message)
+
+    assert [(link.kind, link.token) for link in links] == [
+        ("sheets", "sht_first"),
+        ("wiki", "wik_second"),
+    ]
+    assert extract_feishu_table_link(message) == links[0]
 
 
 def test_sheet_link_exports_using_its_own_token_and_archive_convention(

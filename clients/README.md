@@ -6,7 +6,7 @@
 | --- | --- | --- |
 | `feishu_client.py` | token 缓存、重试、脱敏、消息资源下载、Wiki 查询、导出任务与导出文件下载。 | `FeishuClient`、`WikiNode`、`ExportTaskResult`、异常类型。 |
 | `feishu_attachment.py` | 从 Channel 消息提取文件元数据，限制 Excel 后缀并保存至收件箱，同时生成稳定来源 ID。 | `ExcelAttachmentDownloader.download_from_message()`。 |
-| `feishu_table_export.py` | 从文本识别 Sheets/Wiki 链接，解析 Wiki 后导出到消息归档或指定缓存路径。 | `extract_feishu_table_link()`、`export_from_message()`、`export_link_to_path()`。 |
+| `feishu_table_export.py` | 从文本识别一个或多个 Sheets/Wiki 链接，解析 Wiki 后导出到消息归档或指定缓存路径。 | `extract_feishu_table_links()`、`extract_feishu_table_link()`、`export_from_message()`、`export_link_to_path()`。 |
 | `__init__.py` | 对外汇总稳定的客户端、模型和异常导入。 | 包级导出。 |
 
 ## 链接导出边界
@@ -15,6 +15,7 @@
 - `/wiki/<token>` 必须先通过 Wiki 节点接口解析；只有返回 `obj_type=sheet` 或 `bitable` 才能导出，且导出 Token 必须是返回的 `obj_token`。
 - Wiki 节点标题优先于导出任务文件名；路径固定为 `data/archive/YYYY-MM/sender_open_id/SUB-..._<title>.xlsx`。
 - 固定来源复用同一解析和导出链路，但由监听器提供 staging/latest 路径；Wiki 节点每次刷新都重新解析。
+- 批量提取按消息中首次出现顺序返回，以链接类型和 Token 去重；原单链接提取接口继续返回第一条，供临时来源流程兼容使用。
 - HTTP 层只抛出结构化异常；`WikiTablePermissionError` 和面向用户的中文回复由监听器层处理。
 - 附件来源 ID 使用消息 ID 与文件 Key；链接来源 ID 使用消息 ID、文档类型与文档 Token。该 ID 供汇总批次防重复使用，不代表业务记录唯一键。
 

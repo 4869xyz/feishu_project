@@ -136,16 +136,21 @@ def _message_texts(message: object) -> list[str]:
     return texts
 
 
-def extract_feishu_table_link(message: object) -> FeishuTableLink | None:
-    """Find the first supported `/sheets/` or `/wiki/` link in a message.
+def extract_feishu_table_links(message: object) -> tuple[FeishuTableLink, ...]:
+    """Find all distinct `/sheets/` and `/wiki/` links in message order.
 
     ``urlsplit`` separates query strings and fragments before extracting the
     following path segment, so neither can leak into a Feishu document token.
+    The same normalized event can expose its text through several SDK fields;
+    stable source-identity de-duplication prevents those mirrors (or a repeated
+    URL in one command) from registering the same cloud table more than once.
     """
 
+    links: list[FeishuTableLink] = []
+    seen: set[tuple[str, str]] = set()
     for text in _message_texts(message):
         for match in FEISHU_LINK_PATTERN.finditer(text):
-            url = match.group(0).rstrip(".,;:!?")
+            url = match.group(0).rstrip(".,;:!?，。；：！？")
             parsed = urlsplit(url)
             hostname = (parsed.hostname or "").lower()
             if not (hostname == "feishu.cn" or hostname.endswith(".feishu.cn")):
@@ -157,9 +162,19 @@ def extract_feishu_table_link(message: object) -> FeishuTableLink | None:
                 if kind not in {"sheets", "wiki"}:
                     continue
                 token = segments[index + 1].strip()
-                if token:
-                    return FeishuTableLink(kind=kind, token=token, url=url)
-    return None
+                identity = (kind, token)
+                if token and identity not in seen:
+                    seen.add(identity)
+                    links.append(FeishuTableLink(kind=kind, token=token, url=url))
+                break
+    return tuple(links)
+
+
+def extract_feishu_table_link(message: object) -> FeishuTableLink | None:
+    """Find the first supported Feishu table link for legacy single-link flows."""
+
+    links = extract_feishu_table_links(message)
+    return links[0] if links else None
 
 
 def _message_id(message: object) -> str:

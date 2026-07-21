@@ -70,13 +70,28 @@ def _make_source(
     workbook.save(path)
 
 
-def _source_row(*, group=None, sequence=None, person=None, note=None, months=()) -> list:
+def _source_row(
+    *,
+    group=None,
+    sequence=None,
+    person=None,
+    customer=None,
+    product=None,
+    location=None,
+    customer_source=None,
+    note=None,
+    months=(),
+) -> list:
     """Return one A:T source row with selected test values."""
 
     values = [None] * 20
     values[0] = group
     values[1] = sequence
     values[2] = person
+    values[3] = customer
+    values[4] = product
+    values[5] = location
+    values[6] = customer_source
     values[7] = note
     for index, value in enumerate(months):
         values[8 + index] = value
@@ -688,6 +703,7 @@ def test_yellow_orange_key_fields_hide_rows_without_losing_data_or_totals(
             group="甲组" if index == 1 else None,
             sequence=index,
             person="同一人",
+            customer_source="展会" if index == 13 else None,
             note=f"明细{index}",
             months=(index,),
         )
@@ -769,6 +785,10 @@ def test_each_c_to_g_key_field_can_trigger_hiding_but_other_columns_cannot(
                 group="甲组" if index == 1 else None,
                 sequence=index,
                 person="同一人",
+                customer=f"客户{index}",
+                product=f"项目{index}",
+                location=f"地点{index}",
+                customer_source=f"来源{index}",
                 months=(index,),
             )
             for index in range(1, 8)
@@ -801,6 +821,93 @@ def test_each_c_to_g_key_field_can_trigger_hiding_but_other_columns_cannot(
     assert hidden_rows == {4, 5, 6, 7, 8}
     assert sheet.row_dimensions[9].hidden is False
     assert sheet.row_dimensions[10].hidden is False
+    workbook.close()
+
+
+def test_yellow_style_on_blank_key_field_does_not_hide_black_text_row(
+    project_tmp_dir: Path,
+) -> None:
+    """A blank C:G cell cannot hide a row whose populated key fields are black."""
+
+    template = project_tmp_dir / "template.xlsx"
+    source = project_tmp_dir / "blank-yellow-style.xlsx"
+    output = project_tmp_dir / "output.xlsx"
+    _make_template(template)
+    _make_source(
+        source,
+        [
+            _source_row(
+                group="甲组",
+                sequence=1,
+                person="黑色人员",
+                customer="黑色客户",
+                product="黑色项目",
+                location="黑色地点",
+                customer_source=None,
+                months=(10,),
+            )
+        ],
+        signing_sheet_name="签约数据",
+    )
+
+    workbook = load_workbook(source)
+    sheet = workbook["签约数据"]
+    for column in range(3, 7):
+        sheet.cell(4, column).font = Font(color=Color(rgb="FF000000"))
+    sheet["G4"].font = Font(color=Color(rgb="FFFFC000"))
+    workbook.save(source)
+    workbook.close()
+
+    aggregate_sales_workbooks(
+        [SourceWorkbook("blank-yellow-style", source)], template, output
+    )
+
+    workbook = load_workbook(output, data_only=False)
+    sheet = workbook[SIGNING_TARGET]
+    assert sheet.row_dimensions[4].hidden is False
+    assert sheet["C4"].font.color.rgb == "FF000000"
+    assert sheet["G4"].value is None
+    assert sheet["G4"].font.color.rgb == "FFFFC000"
+    assert sheet["I4"].value == 10
+    workbook.close()
+
+
+def test_theme_color_indexes_use_dark_then_light_ooxml_order(
+    project_tmp_dir: Path,
+) -> None:
+    """Theme 0 remains dark even when theme 1 is customized to yellow."""
+
+    template = project_tmp_dir / "template.xlsx"
+    source = project_tmp_dir / "theme-order.xlsx"
+    output = project_tmp_dir / "output.xlsx"
+    _make_template(template)
+    _make_source(
+        source,
+        [
+            _source_row(group="甲组", sequence=1, person="同一人", months=(1,)),
+            _source_row(sequence=2, person="同一人", months=(2,)),
+        ],
+        signing_sheet_name="签约情况",
+    )
+
+    workbook = load_workbook(source)
+    workbook.loaded_theme = theme_xml.replace(
+        'lastClr="FFFFFF"', 'lastClr="FFC000"', 1
+    ).encode("utf-8")
+    sheet = workbook["签约情况"]
+    sheet["C4"].font = Font(color=Color(theme=0))
+    sheet["C5"].font = Font(color=Color(theme=1))
+    workbook.save(source)
+    workbook.close()
+
+    aggregate_sales_workbooks(
+        [SourceWorkbook("theme-order", source)], template, output
+    )
+
+    workbook = load_workbook(output, data_only=False)
+    sheet = workbook[SIGNING_TARGET]
+    assert sheet.row_dimensions[4].hidden is False
+    assert sheet.row_dimensions[5].hidden is True
     workbook.close()
 
 

@@ -55,6 +55,8 @@ class RefreshingTableExporter:
     def __init__(self, *, payload: bytes = b"fresh-xlsx") -> None:
         self.payload = payload
         self.error: Exception | None = None
+        self.errors_by_token: dict[str, Exception] = {}
+        self.titles_by_token: dict[str, str] = {}
         self.calls: list[tuple[FeishuTableLink, Path, str]] = []
 
     def export_from_message(self, message: object) -> None:
@@ -69,15 +71,16 @@ class RefreshingTableExporter:
     ) -> DownloadedTableExport:
         path = Path(destination)
         self.calls.append((link, path, source_file_id))
-        if self.error is not None:
-            raise self.error
+        error = self.errors_by_token.get(link.token, self.error)
+        if error is not None:
+            raise error
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_bytes(self.payload)
         return DownloadedTableExport(
             path=path,
             bytes_written=len(self.payload),
             document_type="sheet",
-            title="固定销售表",
+            title=self.titles_by_token.get(link.token, "固定销售表"),
             source_file_id=source_file_id,
         )
 
@@ -368,6 +371,130 @@ def test_registered_cloud_source_command_lifecycle(
     assert store.list_registered_sources("oc_chat", "ou_sender") == ()
     assert registered[0].cached_path.exists() is False
     assert "已移除固定云表" in channel.calls[-1][1]["text"]
+
+
+def test_add_registered_cloud_sources_accepts_multiple_links_in_one_command(
+    project_tmp_dir: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Mixed Sheets/Wiki links are registered once in their message order."""
+
+    channel = RecordingChannel()
+    store = AggregationBatchStore(project_tmp_dir / "aggregation")
+    exporter = RefreshingTableExporter()
+    exporter.titles_by_token = {
+        "sht_first": "第一份销售表",
+        "wik_second": "第二份销售表",
+        "sht_third": "第三份销售表",
+    }
+    monkeypatch.setattr(
+        "feishu_bot_listener.validate_source_workbook",
+        lambda source: SourceValidationResult("签约情况", 4),
+    )
+    message = SimpleNamespace(
+        chat_id="oc_chat",
+        message_id="om_batch_add",
+        sender_open_id="ou_sender",
+        content_text=(
+            '<at user_id="ou_bot">机器人</at> 添加云表\n'
+            "https://example.feishu.cn/sheets/sht_first\n"
+            "https://example.feishu.cn/wiki/wik_second "
+            "https://example.feishu.cn/sheets/sht_third"
+        ),
+    )
+
+    asyncio.run(
+        handle_message(
+            channel,
+            StubAttachmentDownloader(),
+            exporter,
+            message,
+            asyncio.Lock(),
+            batch_store=store,
+            sales_template_path=project_tmp_dir / "template.xlsx",
+        )
+    )
+
+    registered = store.list_registered_sources("oc_chat", "ou_sender")
+    assert [source.token for source in registered] == [
+        "sht_first",
+        "wik_second",
+        "sht_third",
+    ]
+    assert [source.display_name for source in registered] == [
+        "第一份销售表",
+        "第二份销售表",
+        "第三份销售表",
+    ]
+    reply = channel.calls[-1][1]["text"]
+    assert "成功 3 份，已存在 0 份，失败 0 份；当前共 3 份" in reply
+    assert "1. 第一份销售表" in reply
+    assert "2. 第二份销售表" in reply
+    assert "3. 第三份销售表" in reply
+
+
+def test_batch_add_skips_existing_source_and_continues_after_one_failure(
+    project_tmp_dir: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """One duplicate or failed export does not roll back other new sources."""
+
+    channel = RecordingChannel()
+    store = AggregationBatchStore(project_tmp_dir / "aggregation")
+    existing_cache = store.registered_cache_path(
+        "oc_chat", "ou_sender", "sheets", "sht_existing"
+    )
+    existing_cache.parent.mkdir(parents=True, exist_ok=True)
+    existing_cache.write_bytes(b"old")
+    store.add_registered_source(
+        "oc_chat",
+        "ou_sender",
+        kind="sheets",
+        token="sht_existing",
+        url="https://example.feishu.cn/sheets/sht_existing",
+        display_name="已登记销售表",
+        cached_path=existing_cache,
+        refreshed_at="2026-07-20T10:00:00",
+    )
+    exporter = RefreshingTableExporter()
+    exporter.errors_by_token["sht_failed"] = FeishuClientError("secret token")
+    exporter.titles_by_token["sht_new"] = "新增销售表"
+    monkeypatch.setattr(
+        "feishu_bot_listener.validate_source_workbook",
+        lambda source: SourceValidationResult("签约情况", 4),
+    )
+    message = SimpleNamespace(
+        chat_id="oc_chat",
+        message_id="om_partial_batch_add",
+        sender_open_id="ou_sender",
+        content_text=(
+            "添加云表 "
+            "https://example.feishu.cn/sheets/sht_existing "
+            "https://example.feishu.cn/sheets/sht_failed "
+            "https://example.feishu.cn/sheets/sht_new"
+        ),
+    )
+
+    asyncio.run(
+        handle_message(
+            channel,
+            StubAttachmentDownloader(),
+            exporter,
+            message,
+            asyncio.Lock(),
+            batch_store=store,
+            sales_template_path=project_tmp_dir / "template.xlsx",
+        )
+    )
+
+    registered = store.list_registered_sources("oc_chat", "ou_sender")
+    assert [source.token for source in registered] == ["sht_existing", "sht_new"]
+    reply = channel.calls[-1][1]["text"]
+    assert "成功 1 份，已存在 1 份，失败 1 份；当前共 2 份" in reply
+    assert "1. 已登记销售表" in reply
+    assert "2. 新增销售表" in reply
+    assert "第 2 个链接：飞书导出或下载失败，请稍后重试" in reply
+    assert "secret token" not in reply
 
 
 def test_registered_cloud_sources_reorder_validate_and_clear(

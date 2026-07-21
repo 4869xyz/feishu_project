@@ -25,6 +25,7 @@ from clients.feishu_table_export import (
     UnsupportedFeishuTableLink,
     WikiTablePermissionError,
     extract_feishu_table_link,
+    extract_feishu_table_links,
     message_sender_open_id,
     message_texts,
 )
@@ -245,7 +246,7 @@ def _registered_source_command(message: object) -> tuple[str, str] | None:
             return "list", ""
         if cleaned == "清空云表":
             return "clear", ""
-        add_match = re.fullmatch(r"添加云表(?:\s+|[:：])?(.*)", cleaned)
+        add_match = re.fullmatch(r"添加云表(?:\s+|[:：])?([\s\S]*)", cleaned)
         if add_match:
             return "add", add_match.group(1).strip()
         remove_match = re.fullmatch(r"移除云表(?:\s+|[:：])?(.*)", cleaned)
@@ -363,6 +364,51 @@ def _refresh_error(
     if isinstance(exc, FeishuClientError):
         return f"{prefix}：飞书导出或下载失败，请稍后重试"
     return f"{prefix}：{exc}"
+
+
+def _registration_failure_reason(exc: Exception) -> str:
+    """Return a concise per-link failure reason without exposing its token."""
+
+    if isinstance(exc, WikiTablePermissionError):
+        return "机器人没有读取该 Wiki 节点或导出表格的权限"
+    if isinstance(exc, UnsupportedFeishuTableLink):
+        return "当前链接不是可导出的销售表格"
+    if isinstance(exc, FeishuClientError):
+        return "飞书导出或下载失败，请稍后重试"
+    if isinstance(exc, SalesAggregationError):
+        return f"销售表结构校验失败：{exc}"
+    if isinstance(exc, OSError):
+        return "本地缓存写入失败，请稍后重试"
+    if isinstance(exc, ValueError):
+        return "登记参数或缓存状态无效"
+    return "固定云表状态异常，请稍后重试"
+
+
+def _batch_registration_reply(
+    successes: list[tuple[int, str]],
+    duplicates: list[tuple[int, str]],
+    failures: list[tuple[int, str]],
+    total_registered: int,
+) -> str:
+    """Build one compact result message for a multi-link registration command."""
+
+    lines = [
+        "云表批量登记完成："
+        f"成功 {len(successes)} 份，已存在 {len(duplicates)} 份，"
+        f"失败 {len(failures)} 份；当前共 {total_registered} 份。"
+    ]
+    if successes:
+        lines.append("新增：")
+        lines.extend(f"{number}. {name}" for number, name in successes)
+    if duplicates:
+        lines.append("已存在：")
+        lines.extend(f"{number}. {name}" for number, name in duplicates)
+    if failures:
+        lines.append("失败：")
+        lines.extend(f"第 {position} 个链接：{reason}" for position, reason in failures)
+    if successes:
+        lines.append("以后发送“汇总”时会先重新获取最新数据。")
+    return "\n".join(lines)
 
 
 async def _handle_registered_source_command(
@@ -496,55 +542,101 @@ async def _handle_registered_source_command(
             await _reply(channel, message, reply)
             return
 
-        link = extract_feishu_table_link(message)
-        if action != "add" or link is None:
+        links = extract_feishu_table_links(message)
+        if action != "add" or not links:
             await _reply(
                 channel,
                 message,
-                "请发送“添加云表 <飞书 Sheets/Wiki 表格链接>”。",
-            )
-            return
-        source_id = batch_store.registered_source_id(link.kind, link.token)
-        duplicate = next(
-            (item for item in registered if item.source_id == source_id),
-            None,
-        )
-        if duplicate is not None:
-            duplicate_number = registered.index(duplicate) + 1
-            await _reply(
-                channel,
-                message,
-                f"该云表已经登记：{duplicate.display_name}（编号 {duplicate_number}）。",
+                "请发送“添加云表 <链接1> <链接2> ...”，"
+                "多个飞书 Sheets/Wiki 链接可用空格或换行分隔。",
             )
             return
 
-        exported, latest_path = await asyncio.to_thread(
-            _refresh_cloud_source_sync,
-            table_exporter,
-            batch_store,
-            chat_id,
-            sender_open_id,
-            link=link,
-            source_id=source_id,
+        registered_by_id = {
+            item.source_id: (position, item)
+            for position, item in enumerate(registered, 1)
+        }
+        successes: list[tuple[int, str]] = []
+        duplicates: list[tuple[int, str]] = []
+        failures: list[tuple[int, str]] = []
+        handled_errors = (
+            WikiTablePermissionError,
+            UnsupportedFeishuTableLink,
+            FeishuClientError,
+            SalesAggregationError,
+            OSError,
+            ValueError,
+            RuntimeError,
         )
-        refreshed_at = datetime.now().isoformat(timespec="seconds")
-        result = batch_store.add_registered_source(
-            chat_id,
-            sender_open_id,
-            kind=link.kind,
-            token=link.token,
-            url=link.url,
-            display_name=exported.title,
-            cached_path=latest_path,
-            refreshed_at=refreshed_at,
+
+        for input_position, link in enumerate(links, 1):
+            source_id = batch_store.registered_source_id(link.kind, link.token)
+            existing = registered_by_id.get(source_id)
+            if existing is not None:
+                number, source = existing
+                duplicates.append((number, source.display_name))
+                continue
+
+            try:
+                exported, latest_path = await asyncio.to_thread(
+                    _refresh_cloud_source_sync,
+                    table_exporter,
+                    batch_store,
+                    chat_id,
+                    sender_open_id,
+                    link=link,
+                    source_id=source_id,
+                )
+                refreshed_at = datetime.now().isoformat(timespec="seconds")
+                result = batch_store.add_registered_source(
+                    chat_id,
+                    sender_open_id,
+                    kind=link.kind,
+                    token=link.token,
+                    url=link.url,
+                    display_name=exported.title,
+                    cached_path=latest_path,
+                    refreshed_at=refreshed_at,
+                )
+            except handled_errors as exc:
+                LOGGER.warning(
+                    "固定云表批量登记单项失败：message_id=%s, position=%s, error_type=%s",
+                    getattr(message, "message_id", "unknown"),
+                    input_position,
+                    exc.__class__.__name__,
+                )
+                failures.append((input_position, _registration_failure_reason(exc)))
+                continue
+
+            if result.added:
+                number = result.registered_count
+                successes.append((number, result.source.display_name))
+            else:
+                current = batch_store.list_registered_sources(chat_id, sender_open_id)
+                number = current.index(result.source) + 1
+                duplicates.append((number, result.source.display_name))
+            registered_by_id[source_id] = (number, result.source)
+
+        total_registered = len(
+            batch_store.list_registered_sources(chat_id, sender_open_id)
         )
-        await _reply(
-            channel,
-            message,
-            f"固定云表已登记（共 {result.registered_count} 份）："
-            f"{result.source.display_name}（编号 {result.registered_count}）。"
-            "以后发送“汇总”时会先重新获取最新数据。",
-        )
+        if len(links) == 1 and successes:
+            number, display_name = successes[0]
+            reply = (
+                f"固定云表已登记（共 {total_registered} 份）："
+                f"{display_name}（编号 {number}）。"
+                "以后发送“汇总”时会先重新获取最新数据。"
+            )
+        elif len(links) == 1 and duplicates:
+            number, display_name = duplicates[0]
+            reply = f"该云表已经登记：{display_name}（编号 {number}）。"
+        elif len(links) == 1:
+            reply = f"固定云表未登记：{failures[0][1]}。"
+        else:
+            reply = _batch_registration_reply(
+                successes, duplicates, failures, total_registered
+            )
+        await _reply(channel, message, reply)
 
 
 async def _handle_cache_cleanup_command(

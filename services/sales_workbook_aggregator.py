@@ -59,10 +59,10 @@ XML_MAIN_NS = "http://schemas.openxmlformats.org/spreadsheetml/2006/main"
 XML_DRAWING_NS = "http://schemas.openxmlformats.org/drawingml/2006/main"
 SHARED_STRINGS_REL_TYPE = f"{XML_DOC_REL_NS}/sharedStrings"
 THEME_COLOR_KEYS = (
-    "lt1",
     "dk1",
-    "lt2",
+    "lt1",
     "dk2",
+    "lt2",
     "accent1",
     "accent2",
     "accent3",
@@ -431,13 +431,15 @@ def _font_color_is_yellow_or_orange(
 
 
 def _signing_key_fields_have_yellow_or_orange(
+    values: Sequence[Any],
     colors: Sequence[Any],
     theme_palette: tuple[tuple[int, int, int] | None, ...],
 ) -> bool:
-    """Check personnel and business identity fields C:G for a warm marker color."""
+    """Check non-empty personnel and business identity fields C:G for a warm marker."""
 
     return any(
-        _font_color_is_yellow_or_orange(colors[column - 1], theme_palette)
+        not _is_blank(values[column - 1])
+        and _font_color_is_yellow_or_orange(colors[column - 1], theme_palette)
         for column in SIGNING_HIDE_COLOR_COLUMNS
     )
 
@@ -501,7 +503,7 @@ def _parse_signing(
             copy(sheet.cell(row, column).font.color) for column in range(1, 21)
         ]
         hide_in_output = _signing_key_fields_have_yellow_or_orange(
-            raw_font_colors, theme_palette
+            values, raw_font_colors, theme_palette
         )
         font_colors = list(raw_font_colors)
         if _is_blank(group_value):
