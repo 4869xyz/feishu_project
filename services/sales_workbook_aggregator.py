@@ -18,6 +18,7 @@ import xml.etree.ElementTree as ET
 import zipfile
 
 from openpyxl import load_workbook
+from openpyxl.styles import Border, Side
 from openpyxl.styles.colors import COLOR_INDEX
 from openpyxl.utils import get_column_letter
 from openpyxl.worksheet.worksheet import Worksheet
@@ -84,6 +85,14 @@ SIGNING_ACCOUNTING_FORMAT = (
 SIGNING_AMOUNT_MIN_WIDTH = 12.0
 SIGNING_AMOUNT_WIDTH_PADDING = 4
 EXCEL_MAX_COLUMN_WIDTH = 255.0
+SIGNING_GRID_BORDER_COLOR = "FF000000"
+SIGNING_GRID_BORDER_SIDE = Side(style="thin", color=SIGNING_GRID_BORDER_COLOR)
+SIGNING_GRID_BORDER = Border(
+    left=SIGNING_GRID_BORDER_SIDE,
+    right=SIGNING_GRID_BORDER_SIDE,
+    top=SIGNING_GRID_BORDER_SIDE,
+    bottom=SIGNING_GRID_BORDER_SIDE,
+)
 
 
 class SalesAggregationError(RuntimeError):
@@ -189,6 +198,7 @@ class SigningWriteResult:
 
     last_row: int
     hidden_detail_rows: frozenset[int]
+    spacer_rows: frozenset[int]
     amount_column_widths: tuple[float, ...]
 
 
@@ -628,6 +638,75 @@ def _apply_signing_amount_format(sheet: Worksheet, row: int) -> None:
         sheet.cell(row, column).number_format = SIGNING_ACCOUNTING_FORMAT
 
 
+def _apply_signing_grid_borders(
+    sheet: Worksheet,
+    last_row: int,
+    spacer_rows: frozenset[int],
+) -> None:
+    """Apply the signing grid while leaving spacer-row B:T cells borderless."""
+
+    for row in sheet.iter_rows(
+        min_row=1,
+        max_row=last_row,
+        min_col=1,
+        max_col=20,
+    ):
+        for cell in row:
+            cell.border = (
+                Border()
+                if cell.row in spacer_rows and cell.column >= 2
+                else SIGNING_GRID_BORDER
+            )
+
+
+def _has_signing_grid_border(
+    cell: Any,
+    required_edges: Sequence[str] = ("left", "right", "top", "bottom"),
+) -> bool:
+    """Return whether the requested cell edges use the signing grid border."""
+
+    return all(
+        side.style == "thin"
+        and side.color is not None
+        and side.color.type == "rgb"
+        and side.color.rgb == SIGNING_GRID_BORDER_COLOR
+        for side in (getattr(cell.border, edge) for edge in required_edges)
+    )
+
+
+def _has_any_cell_border(cell: Any) -> bool:
+    """Return whether one cell has any visible box edge."""
+
+    return any(
+        side is not None and side.style is not None
+        for side in (
+            cell.border.left,
+            cell.border.right,
+            cell.border.top,
+            cell.border.bottom,
+        )
+    )
+
+
+def _signing_grid_required_edges(sheet: Worksheet, cell: Any) -> tuple[str, ...]:
+    """Return visible perimeter edges for a normal or merged signing cell."""
+
+    for merged_range in sheet.merged_cells.ranges:
+        if cell.coordinate not in merged_range:
+            continue
+        edges: list[str] = []
+        if cell.column == merged_range.min_col:
+            edges.append("left")
+        if cell.column == merged_range.max_col:
+            edges.append("right")
+        if cell.row == merged_range.min_row:
+            edges.append("top")
+        if cell.row == merged_range.max_row:
+            edges.append("bottom")
+        return tuple(edges)
+    return ("left", "right", "top", "bottom")
+
+
 def _autofit_signing_amount_columns(
     sheet: Worksheet, records: Sequence[SigningRecord]
 ) -> tuple[float, ...]:
@@ -829,6 +908,7 @@ def _write_signing_sheet(
 
     row = 4
     hidden_detail_rows: set[int] = set()
+    spacer_rows: set[int] = set()
     group_month_rows: list[int] = []
     groups = list(grouped.items())
     for group_index, (group, people) in enumerate(groups):
@@ -868,9 +948,11 @@ def _write_signing_sheet(
             row += 3
             if person_index < len(people_items) - 1:
                 _apply_row_style(sheet, row, samples.person_spacer, 20)
+                spacer_rows.add(row)
                 row += 1
 
         _apply_row_style(sheet, row, samples.person_spacer, 20)
+        spacer_rows.add(row)
         row += 1
 
         group_month = row
@@ -897,9 +979,11 @@ def _write_signing_sheet(
         row += 3
         if group_index < len(groups) - 1:
             _apply_row_style(sheet, row, samples.group_spacer, 20)
+            spacer_rows.add(row)
             row += 1
 
     _apply_row_style(sheet, row, samples.group_spacer, 20)
+    spacer_rows.add(row)
     row += 1
 
     department_month = row
@@ -923,9 +1007,13 @@ def _write_signing_sheet(
             SIGNING_DEPT_YEAR,
         )[target_row - department_month]
     amount_column_widths = _autofit_signing_amount_columns(sheet, records)
+    last_row = department_month + 2
+    frozen_spacer_rows = frozenset(spacer_rows)
+    _apply_signing_grid_borders(sheet, last_row, frozen_spacer_rows)
     return SigningWriteResult(
-        last_row=department_month + 2,
+        last_row=last_row,
         hidden_detail_rows=frozenset(hidden_detail_rows),
+        spacer_rows=frozen_spacer_rows,
         amount_column_widths=amount_column_widths,
     )
 
@@ -1127,12 +1215,40 @@ def _verify_output(
     *,
     signing_last_row: int,
     expected_hidden_rows: frozenset[int],
+    expected_spacer_rows: frozenset[int],
     expected_amount_column_widths: tuple[float, ...],
 ) -> None:
     workbook = load_workbook(output_path, data_only=False, read_only=False)
     try:
         signing = _validate_template(workbook)
         _formula_scan(signing, signing_last_row, 20)
+        for row in range(1, signing_last_row + 1):
+            for column in range(1, 21):
+                cell = signing.cell(row, column)
+                if row in expected_spacer_rows and column >= 2:
+                    if _has_any_cell_border(cell):
+                        raise SalesAggregationError(
+                            f"{signing.title} / {cell.coordinate}："
+                            "签约汇总间隔行 B:T 不应添加边框"
+                        )
+                    continue
+                required_edges = _signing_grid_required_edges(signing, cell)
+                if required_edges and not _has_signing_grid_border(
+                    cell, required_edges
+                ):
+                    raise SalesAggregationError(
+                        f"{signing.title} / {cell.coordinate}：签约汇总边框错误，"
+                        "期望黑色细边框"
+                    )
+        for column in range(1, 21):
+            cell = signing.cell(signing_last_row + 1, column)
+            if any(
+                _has_signing_grid_border(cell, (edge,))
+                for edge in ("left", "right", "top", "bottom")
+            ):
+                raise SalesAggregationError(
+                    f"{signing.title} / {cell.coordinate}：最后汇总行后的空行不应添加边框"
+                )
         for column, expected_width in zip(
             SIGNING_AMOUNT_COLUMNS, expected_amount_column_widths
         ):
@@ -1233,6 +1349,7 @@ def aggregate_sales_workbooks(
                 patched_temp,
                 signing_last_row=signing_write.last_row,
                 expected_hidden_rows=signing_write.hidden_detail_rows,
+                expected_spacer_rows=signing_write.spacer_rows,
                 expected_amount_column_widths=signing_write.amount_column_widths,
             )
             os.replace(patched_temp, output)

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from copy import copy
 from decimal import Decimal
 from pathlib import Path
 
@@ -133,6 +134,37 @@ def _font_color_signature(cell) -> tuple | None:
     else:
         value = None
     return color.type, value, color.tint
+
+
+def _style_without_border(cell) -> tuple:
+    return (
+        copy(cell.font),
+        copy(cell.fill),
+        copy(cell.alignment),
+        cell.number_format,
+        copy(cell.protection),
+    )
+
+
+def _is_thin_black_side(side) -> bool:
+    return (
+        side.style == "thin"
+        and side.color is not None
+        and side.color.type == "rgb"
+        and side.color.rgb == "FF000000"
+    )
+
+
+def _has_any_box_side(cell) -> bool:
+    return any(
+        side is not None and side.style is not None
+        for side in (
+            cell.border.left,
+            cell.border.right,
+            cell.border.top,
+            cell.border.bottom,
+        )
+    )
 
 
 def _make_template(path: Path, *, include_repayment: bool = True) -> None:
@@ -276,14 +308,64 @@ def test_aggregate_rebuilds_signing_and_preserves_repayment(
     assert "A15:A22" in {str(item) for item in signing.merged_cells.ranges}
     assert all(not signing.row_dimensions[row].hidden for row in range(4, 27))
     assert all(signing.cell(10, column).value is None for column in range(1, 21))
+    assert all(signing.cell(14, column).value is None for column in range(1, 21))
     assert all(signing.cell(19, column).value is None for column in range(1, 21))
     assert all(signing.cell(23, column).value is None for column in range(1, 21))
+    for coordinate in ("A1", "T1", "A3", "T3", "T24"):
+        border = signing[coordinate].border
+        assert all(
+            _is_thin_black_side(side)
+            for side in (border.left, border.right, border.top, border.bottom)
+        )
+    assert _is_thin_black_side(signing["A4"].border.top)
+    assert _is_thin_black_side(signing["A13"].border.bottom)
+    assert all(
+        _is_thin_black_side(side)
+        for side in (
+            signing["A10"].border.left,
+            signing["A10"].border.right,
+            signing["A19"].border.left,
+            signing["A19"].border.right,
+        )
+    )
+    for coordinate in ("A14", "A23"):
+        border = signing[coordinate].border
+        assert all(
+            _is_thin_black_side(side)
+            for side in (border.left, border.right, border.top, border.bottom)
+        )
+    for spacer_row in (10, 14, 19, 23):
+        assert all(
+            not _has_any_box_side(signing.cell(spacer_row, column))
+            for column in range(2, 21)
+        )
+    assert all(
+        _is_thin_black_side(side)
+        for side in (
+            signing["I26"].border.left,
+            signing["I26"].border.top,
+            signing["I26"].border.bottom,
+            signing["T26"].border.right,
+            signing["T26"].border.top,
+            signing["T26"].border.bottom,
+        )
+    )
+    for column in range(1, 21):
+        border = signing.cell(27, column).border
+        assert not any(
+            _is_thin_black_side(side)
+            for side in (border.left, border.right, border.top, border.bottom)
+        )
 
     template_workbook = load_workbook(template, data_only=False)
     template_signing = template_workbook[SIGNING_TARGET]
-    assert signing["B10"]._style == template_signing["B8"]._style
+    assert _style_without_border(signing["B10"]) == _style_without_border(
+        template_signing["B8"]
+    )
     assert signing.row_dimensions[10].height == template_signing.row_dimensions[8].height
-    assert signing["B23"]._style == template_signing["B12"]._style
+    assert _style_without_border(signing["B23"]) == _style_without_border(
+        template_signing["B12"]
+    )
     assert signing.row_dimensions[23].height == template_signing.row_dimensions[12].height
     template_workbook.close()
 
@@ -563,7 +645,8 @@ def test_detail_cells_preserve_source_font_colors_only(
         output_sheet["C4"].alignment.horizontal
         == template_sheet["C4"].alignment.horizontal
     )
-    assert output_sheet["C4"].border.left.style == template_sheet["C4"].border.left.style
+    assert output_sheet["C4"].border.left.style == "thin"
+    assert output_sheet["C4"].border.left.color.rgb == "FF000000"
     assert output_sheet["I4"].number_format == SIGNING_ACCOUNTING_FORMAT
     assert output_sheet["I4"].number_format != template_sheet["I4"].number_format
 
