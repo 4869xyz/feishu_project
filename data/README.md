@@ -1,6 +1,6 @@
 # `data` 目录
 
-此目录只存放本地运行产物，不存放源代码、密钥或长期业务数据库。
+此目录只存放本地运行产物，不存放源代码或密钥。销售机器人不使用数据库；纪要机器人在独立子目录保存自己的 SQLite 业务数据库。
 
 | 路径 | 内容 | Git 规则 |
 | --- | --- | --- |
@@ -9,6 +9,8 @@
 | `data/aggregation/state/` | 按聊天和发送人隔离的临时批次、已处理来源 ID 和固定云表登记。 | 忽略实际文件。 |
 | `data/aggregation/registered/` | 每个固定云表最近一次通过校验的 `latest.xlsx` 缓存。 | 忽略实际文件。 |
 | `data/aggregation/output/` | 自动生成的销售汇总 XLSX，按月份和批次所有者哈希分目录。 | 忽略实际文件。 |
+| `data/meeting_minutes/meeting_minutes.db` | 第二机器人独立的事件、提交和纪要版本数据库。 | 整个目录忽略。 |
+| `data/meeting_minutes/output/` | 管理员生成的版本化周例会纪要 DOCX。 | 整个目录忽略。 |
 
 归档文件名固定为：
 

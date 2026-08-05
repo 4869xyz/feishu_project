@@ -2,6 +2,8 @@
 .env
 .env.*
 !.env.example
+!.env.meeting-minutes.example
+meeting_minutes_bot/config/people.yaml
 
 # Local mentor reference; project rules are derived into tracked documentation
 v2 任何程序项目规范使用Cursor的流程.md
@@ -34,6 +36,8 @@ data/archive/*
 !data/archive/.gitkeep
 data/aggregation/*
 !data/aggregation/.gitkeep
+data/meeting_minutes/
+logs/meeting_minutes/
 
 # Editors and operating systems
 .idea/

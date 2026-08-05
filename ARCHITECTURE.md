@@ -2,7 +2,7 @@
 
 ## 项目定位
 
-这是一个 Python 3.11 飞书机器人：接收直接上传的 Excel 附件，或解析飞书 Sheets/Wiki 链接并导出为 XLSX；校验销售工作簿后按会话批次汇总，并把生成的 XLSX 发回飞书。本项目不进行数据库入库。
+这是一个 Python 3.11 双飞书机器人仓库：原销售机器人接收 Excel 附件或 Sheets/Wiki 链接并生成销售汇总；独立的周例会纪要机器人接收员工私聊文字，以 SQLite 保存可追溯提交，并由管理员生成 DOCX。两者使用不同飞书应用、配置、入口、锁、日志和数据目录。
 
 ## 模块边界与依赖方向
 
@@ -16,10 +16,13 @@
 | `services.aggregation_batch_store` | 按聊天和发送人持久化临时批次、固定云表、latest 缓存和输出路径，并迁移 v1 状态。 | 标准库 |
 | `services.download_cache` | 只在配置的缓存根目录内删除非活动文件，并保护活动批次和显式保护路径。 | 标准库 |
 | `feishu_bot_listener.py` | 配置消息准入、日志和单实例锁，创建长连接、串行编排并把结果或文件转换为飞书回复。 | `config`、`clients`、`services`、`lark-channel-sdk` |
+| `meeting_minutes_bot` | 独立读取 `.env.meeting-minutes` 和人员 YAML，处理私聊文字、幂等入库、权限命令与版本化 DOCX 生成。 | `lark-channel-sdk`、SQLAlchemy、aiosqlite、PyYAML、docxtpl、标准库 |
 | `packaging/windows` | 使用 PyInstaller 生成免 Python 的 Windows x64 便携程序，并提供中文启动、停止和日志入口。 | 项目入口、当前 `.env`、汇总模板、PowerShell |
 | `tests` | 使用 fake/mock 验证配置、API 参数、解析、归档和回复。 | 被测模块、`pytest` |
 
 依赖必须单向：`config` 不依赖 `clients`/`services`；`clients` 和 `services` 不依赖监听器；监听器只编排，不放入 HTTP、链接解析、汇总算法或文件命名细节。
+
+`meeting_minutes_bot` 是完整命名空间，不导入销售监听器或销售业务服务；只有测试会同时获取两个锁文件名以验证隔离。
 
 ## 运行数据流
 
@@ -70,6 +73,28 @@ Windows 便携交付先在开发机执行 `packaging/windows/build_portable.ps1`
   -> 飞书回复 + logs/feishu_bot_listener.log
 ```
 
+### 周例会纪要机器人数据流
+
+```text
+.env.meeting-minutes + meeting_minutes_bot/config/people.yaml + 正式 DOCX 模板
+  -> meeting_minutes_bot.settings.load_settings()
+  -> 持有 logs/meeting_minutes/meeting_minutes_bot.lock（与销售锁独立）
+  -> 初始化 data/meeting_minutes/meeting_minutes.db
+  -> FeishuChannel 长连接（私聊开放、群聊禁用）
+       -> open_id 查询人员 YAML，不读取正文姓名
+       -> message_id 写入 meeting_events，重复事件不再执行
+       -> 普通文字 / 替换：内容
+            -> meeting_submissions 保留人员快照、原文、模式、状态和有效标记
+       -> 查看我的纪要 / 撤回本周提交
+       -> 管理员：查看本周提交状态 / 生成本周纪要
+            -> 按 Asia/Shanghai ISO 周查询有效提交
+            -> 按 template_key 渲染正式模板
+            -> data/meeting_minutes/output/<周期>_v<版本>_<时间戳>.docx
+            -> meeting_documents 保存版本、状态和路径
+       -> 回复文字或 DOCX
+  -> logs/meeting_minutes/meeting_minutes_bot.log
+```
+
 ## Excel 汇总约束
 
 - 只接收 `.xlsx`；单工作表直接作为签约表，多工作表按 `签约情况`、`签约数据`、模糊名称优先级选表，选中表必须符合 A:T 签约结构。
@@ -104,10 +129,12 @@ Windows 便携交付先在开发机执行 `packaging/windows/build_portable.ps1`
 - 缓存清理会先读取所有批次状态并保护仍被引用的源文件，只扫描 `data/inbox/`、`data/archive/` 和汇总 `output/`；不扫描或删除批次 `state/`。
 - 固定来源登记与 latest 缓存位于汇总目录的 `registered/`，不属于全局缓存清理范围；`清空云表` 清固定登记和对应 latest，`清空汇总` 只清临时批次。
 - Lark SDK 日志统一传播到根日志管线；Lark 与 `httpx` 的最低级别固定为 `WARNING`，格式化器继续兜底清理 `access_key`、`ticket`、`access_token` 和 `app_secret` 查询参数。
+- 纪要机器人使用 `group_policy="disabled"`，只接收私聊；其锁文件、日志目录、SQLite、DOCX 输出和 `MEETING_BOT_` 环境变量不得与销售机器人复用。
 
 ## 运行产物与安全
 
 - `.env`、日志、`logs/*.lock`、`data/inbox/` 实际附件、`data/archive/` 实际导出文件和 `data/aggregation/` 状态/结果都不得提交到 Git。
+- `.env.meeting-minutes`、真实人员 YAML、`data/meeting_minutes/` SQLite/DOCX 和 `logs/meeting_minutes/` 同样不得提交；只提交无真实 open_id 的示例配置和测试模板。
 - `data/inbox/.gitkeep`、`data/archive/.gitkeep` 和 `data/aggregation/.gitkeep` 仅保存目录结构。
 - 日志和异常必须脱敏，不输出 App Secret、完整 tenant token、完整文件内容或业务数据。
 - 飞书开放平台 API Scope 与具体 Wiki 节点/文档共享权限是独立条件；两者都满足才能解析和导出 Wiki 表格。

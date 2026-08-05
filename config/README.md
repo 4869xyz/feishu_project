@@ -2,6 +2,8 @@
 
 本目录只管理运行配置与本地目录初始化，不包含飞书 API 请求或消息业务逻辑。
 
+该目录属于原销售机器人。周例会纪要机器人在 `meeting_minutes_bot/settings.py` 中独立读取 `.env.meeting-minutes` 的 `MEETING_BOT_` 变量，不能把两套配置合并到同一个 `.env`。
+
 `settings.py` 的 `load_settings()` 从本地 `.env` 和环境变量读取配置，显式环境变量优先，并返回不可变的 `Settings`。
 
 | 配置项 | 默认值 | 说明 |

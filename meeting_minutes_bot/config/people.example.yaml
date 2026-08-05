@@ -1,0 +1,121 @@
+# open_id 在不同飞书自建应用中通常不同；请使用新纪要应用收到的事件值替换示例键。
+people:
+  ou_replace_general_manager:
+    name: 待补充总经理
+    department: 总经理
+    template_key: general_manager
+    section_order: 1
+    sort_order: 1
+    enabled: false
+    role: employee
+
+  ou_replace_wu_aoxiang:
+    name: 吴傲翔
+    department: 商务部-销售组
+    template_key: wu_aoxiang
+    section_order: 2
+    sort_order: 1
+    enabled: true
+    role: employee
+
+  ou_replace_yang_yilin:
+    name: 杨意林
+    department: 商务部-销售组
+    template_key: yang_yilin
+    section_order: 2
+    sort_order: 2
+    enabled: true
+    role: employee
+
+  ou_replace_ye_mengzhen:
+    name: 叶梦真
+    department: 人事行政
+    template_key: ye_mengzhen
+    section_order: 3
+    sort_order: 1
+    enabled: true
+    role: employee
+
+  ou_replace_zhang_feilong:
+    name: 张飞龙
+    department: 中台
+    template_key: zhang_feilong
+    section_order: 4
+    sort_order: 1
+    enabled: true
+    role: employee
+
+  ou_replace_lin_baili:
+    name: 林柏丽
+    department: 运营推广组
+    template_key: lin_baili
+    section_order: 5
+    sort_order: 1
+    enabled: true
+    role: employee
+
+  ou_replace_liang_jialong:
+    name: 梁家龙
+    department: 后期部
+    template_key: liang_jialong
+    section_order: 6
+    sort_order: 1
+    enabled: true
+    role: employee
+
+  ou_replace_liu_hanwen:
+    name: 刘瀚文
+    department: 后期部
+    template_key: liu_hanwen
+    section_order: 6
+    sort_order: 2
+    enabled: true
+    role: employee
+
+  ou_replace_xu_xinxin:
+    name: 徐兴鑫
+    department: 美术部
+    template_key: xu_xinxin
+    section_order: 7
+    sort_order: 1
+    enabled: true
+    role: employee
+
+  ou_replace_gao_canjian:
+    name: 高灿健
+    department: 美术部
+    template_key: gao_canjian
+    section_order: 7
+    sort_order: 2
+    enabled: true
+    role: employee
+
+  ou_replace_liu_jindi:
+    name: 刘锦娣
+    department: 美术部
+    template_key: liu_jindi
+    section_order: 7
+    sort_order: 3
+    enabled: true
+    role: employee
+
+  ou_replace_ma_gengbin:
+    name: 马耿宾
+    department: 程序部
+    template_key: ma_gengbin
+    section_order: 8
+    sort_order: 1
+    enabled: true
+    role: employee
+
+  ou_replace_zhang_chunwei:
+    name: 张春威
+    department: 程序部
+    template_key: zhang_chunwei
+    section_order: 8
+    sort_order: 2
+    enabled: true
+    role: employee
+
+admins:
+  - ou_replace_admin

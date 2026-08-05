@@ -1,5 +1,7 @@
 # 飞书销售表格收件机器人
 
+> 仓库同时包含一个相互隔离的“周例会纪要机器人”。其配置、命令和源码启动方式见 [`docs/meeting_minutes/README.md`](docs/meeting_minutes/README.md)。现有销售机器人行为不变。
+
 这是一个 Python 3.11 飞书长连接机器人。它会接收聊天中直接上传的 Excel 附件，或用户发送的飞书 Sheets/Wiki 表格链接，校验并暂存销售数据文件，再按既定 SOP 生成签约汇总 Excel 并发送回当前会话。
 
 ## 当前能力
