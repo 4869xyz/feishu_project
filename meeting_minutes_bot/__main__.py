@@ -3,8 +3,14 @@
 from __future__ import annotations
 
 import asyncio
+from contextlib import suppress
 import logging
 
+from .attachments import (
+    AttachmentConfigurationError,
+    AttachmentProcessor,
+    LocalRapidOcrEngine,
+)
 from .document import MinutesDocumentRenderer, MinutesTemplateError
 from .listener import create_channel, handle_message
 from .people import PeopleConfigurationError, load_people
@@ -15,6 +21,7 @@ from .runtime import (
     configure_logging,
     single_instance_lock,
 )
+from .retention import RetentionCleaner
 from .service import MeetingMinutesService
 from .settings import MeetingBotConfigurationError, load_settings
 
@@ -39,10 +46,16 @@ async def run(settings) -> None:
         timezone=settings.timezone,
         max_text_length=settings.max_text_length,
     )
+    attachment_processor = AttachmentProcessor(
+        ocr=LocalRapidOcrEngine(),
+        max_bytes=settings.max_attachment_bytes,
+        max_pdf_pages=settings.max_pdf_pages,
+    )
     channel = create_channel(settings)
+    cleaner = RetentionCleaner(repository=repository, settings=settings)
 
     async def on_message(message: object) -> None:
-        await handle_message(channel, service, message)
+        await handle_message(channel, service, message, attachment_processor)
 
     async def on_error(error: Exception) -> None:
         LOGGER.error("周例会纪要机器人长连接异常：%s", error)
@@ -54,9 +67,16 @@ async def run(settings) -> None:
         settings.database_url,
         settings.output_dir,
     )
+    await cleaner.run_once()
+    cleanup_task = asyncio.create_task(
+        cleaner.run_forever(), name="meeting-minutes-retention-cleanup"
+    )
     try:
         await channel.connect()
     finally:
+        cleanup_task.cancel()
+        with suppress(asyncio.CancelledError):
+            await cleanup_task
         await repository.close()
 
 
@@ -72,6 +92,7 @@ if __name__ == "__main__":
         main()
     except (
         MeetingBotConfigurationError,
+        AttachmentConfigurationError,
         PeopleConfigurationError,
         MinutesTemplateError,
         MeetingBotSingleInstanceError,

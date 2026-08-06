@@ -5,7 +5,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from pathlib import Path
 
-from sqlalchemy import func, select, update
+from sqlalchemy import delete, func, select, update
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncEngine, async_sessionmaker, create_async_engine
 
@@ -19,6 +19,17 @@ class DocumentReservation:
     version: int
 
 
+@dataclass(frozen=True, slots=True)
+class DatabaseCleanupResult:
+    documents: int
+    submissions: int
+    events: int
+
+    @property
+    def total(self) -> int:
+        return self.documents + self.submissions + self.events
+
+
 class MeetingRepository:
     def __init__(self, database_url: str) -> None:
         self.engine: AsyncEngine = create_async_engine(database_url)
@@ -30,6 +41,34 @@ class MeetingRepository:
 
     async def close(self) -> None:
         await self.engine.dispose()
+
+    async def delete_records_before(self, cutoff) -> DatabaseCleanupResult:
+        """Delete expired bot-owned records in one transaction."""
+
+        async with self.sessions.begin() as session:
+            documents = await session.execute(
+                delete(MeetingDocument).where(MeetingDocument.created_at < cutoff)
+            )
+            submissions = await session.execute(
+                delete(MeetingSubmission).where(MeetingSubmission.created_at < cutoff)
+            )
+            events = await session.execute(
+                delete(MeetingEvent).where(MeetingEvent.created_at < cutoff)
+            )
+        return DatabaseCleanupResult(
+            documents=int(documents.rowcount or 0),
+            submissions=int(submissions.rowcount or 0),
+            events=int(events.rowcount or 0),
+        )
+
+    async def vacuum(self) -> None:
+        """Ask SQLite to return unused pages to the filesystem."""
+
+        async with self.engine.connect() as connection:
+            connection = await connection.execution_options(
+                isolation_level="AUTOCOMMIT"
+            )
+            await connection.exec_driver_sql("VACUUM")
 
     async def claim_event(self, message_id: str, action: str) -> bool:
         async with self.sessions() as session:
@@ -57,7 +96,9 @@ class MeetingRepository:
         message_id: str,
         period: str,
         person: Person,
-        content: str,
+        raw_content: str,
+        parsed_content: str,
+        message_type: str,
         mode: str,
     ) -> None:
         async with self.sessions.begin() as session:
@@ -83,8 +124,9 @@ class MeetingRepository:
                     employee_name=person.name,
                     department=person.department,
                     template_key=person.template_key,
-                    raw_content=content,
-                    parsed_content=content,
+                    message_type=message_type,
+                    raw_content=raw_content,
+                    parsed_content=parsed_content,
                     submit_mode=mode,
                     processing_status="COMPLETED",
                     is_active=True,

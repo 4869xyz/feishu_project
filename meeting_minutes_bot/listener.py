@@ -4,10 +4,23 @@ from __future__ import annotations
 
 import json
 import logging
+import math
 from typing import Any
 
-from lark_channel import FeishuChannel, PolicyConfig
+from lark_channel import (
+    ChannelConfig,
+    FeishuChannel,
+    InboundConfig,
+    MediaCacheConfig,
+    PolicyConfig,
+)
 
+from .attachments import (
+    AttachmentProcessingError,
+    AttachmentProcessor,
+    message_attachment_resource,
+    validate_resource_type,
+)
 from .service import MeetingMinutesService, ServiceResult
 from .settings import MeetingBotSettings
 
@@ -16,14 +29,31 @@ LOGGER = logging.getLogger(__name__)
 
 
 def create_channel(settings: MeetingBotSettings) -> FeishuChannel:
+    attachment_dir = settings.attachment_dir or settings.data_dir / "attachments"
     return FeishuChannel(
-        app_id=settings.app_id,
-        app_secret=settings.app_secret,
-        policy=PolicyConfig(
-            dm_policy="open",
-            group_policy="disabled",
-            require_mention=False,
-            respond_to_mention_all=False,
+        config=ChannelConfig(
+            app_id=settings.app_id,
+            app_secret=settings.app_secret,
+            policy=PolicyConfig(
+                dm_policy="open",
+                group_policy="disabled",
+                require_mention=False,
+                respond_to_mention_all=False,
+            ),
+            inbound=InboundConfig(
+                media_max_mb=max(
+                    1, math.ceil(settings.max_attachment_bytes / (1024 * 1024))
+                )
+            ),
+            media_cache=MediaCacheConfig(
+                enabled=True,
+                root_dir=attachment_dir,
+                ttl_seconds=settings.attachment_cache_ttl_seconds,
+                max_entries=128,
+                max_bytes=settings.attachment_cache_max_bytes,
+                max_file_bytes=settings.max_attachment_bytes,
+                image_max_bytes=settings.max_attachment_bytes,
+            ),
         ),
     )
 
@@ -43,6 +73,8 @@ def _nested_value(source: object, *names: str) -> object | None:
 def message_open_id(message: object) -> str:
     candidates = (
         _nested_value(message, "sender_open_id"),
+        _nested_value(message, "sender_id"),
+        _nested_value(message, "sender", "open_id"),
         _nested_value(message, "sender", "sender_id", "open_id"),
         _nested_value(message, "event", "sender", "sender_id", "open_id"),
     )
@@ -65,6 +97,23 @@ def message_text(message: object) -> str:
         if isinstance(decoded, dict):
             return str(decoded.get("text", ""))
     return ""
+
+
+def message_kind(message: object) -> str:
+    """Resolve legacy and lark-channel 1.2 normalized content types."""
+
+    for name in ("raw_content_type", "message_type", "msg_type"):
+        value = _nested_value(message, name)
+        if value:
+            return str(value).strip().lower()
+    value = _nested_value(message, "content", "kind")
+    if value:
+        return str(value).strip().lower()
+    try:
+        resource = message_attachment_resource(message)
+    except AttachmentProcessingError:
+        return "attachment"
+    return resource.type if resource is not None else "text"
 
 
 async def _reply(channel: FeishuChannel, message: Any, text: str) -> None:
@@ -101,24 +150,64 @@ async def handle_message(
     channel: FeishuChannel,
     service: MeetingMinutesService,
     message: Any,
+    attachment_processor: AttachmentProcessor | None = None,
 ) -> None:
-    message_type = str(getattr(message, "message_type", "text") or "text").lower()
-    if message_type != "text":
-        await _reply(channel, message, "当前首版仅支持直接发送文字纪要。")
-        return
     sender_open_id = message_open_id(message)
     if not sender_open_id:
         await _reply(channel, message, "无法识别你的飞书账号，请联系管理员。")
         return
+
+    kind = message_kind(message)
+    if kind in {"text", "post"}:
+        try:
+            result = await service.handle_text(
+                message_id=str(message.message_id),
+                sender_open_id=sender_open_id,
+                text=message_text(message),
+            )
+        except Exception:
+            LOGGER.exception("处理纪要消息失败：message_id=%s", message.message_id)
+            await _reply(channel, message, "纪要处理失败，记录已保留，请稍后重试。")
+            return
+        await _reply(channel, message, result.text)
+        await _reply_file(channel, message, result)
+        return
+
+    rejection = service.submission_rejection(sender_open_id)
+    if rejection is not None:
+        await _reply(channel, message, rejection.text)
+        return
+    if attachment_processor is None:
+        await _reply(channel, message, "附件识别功能尚未初始化，请联系管理员。")
+        return
+
     try:
-        result = await service.handle_text(
+        resource = message_attachment_resource(message)
+        if resource is None:
+            raise AttachmentProcessingError(
+                "无法读取该消息中的附件资源，请重新发送图片或受支持的文件。"
+            )
+        validate_resource_type(resource)
+        await _reply(channel, message, "已收到附件，正在本地识别，请稍候……")
+        cached = await channel.resolve_resource_to_cache(
+            message_id=str(message.message_id), resource=resource
+        )
+        if getattr(cached, "decision", "") != "cached" or not getattr(
+            cached, "path", None
+        ):
+            reason = getattr(cached, "reason", None) or "附件下载失败"
+            raise AttachmentProcessingError(str(reason))
+        attachment = await attachment_processor.extract(cached.path, resource)
+        result = await service.handle_attachment(
             message_id=str(message.message_id),
             sender_open_id=sender_open_id,
-            text=message_text(message),
+            attachment=attachment,
         )
+    except AttachmentProcessingError as exc:
+        await _reply(channel, message, f"附件识别失败：{exc}")
+        return
     except Exception:
-        LOGGER.exception("处理纪要消息失败：message_id=%s", message.message_id)
-        await _reply(channel, message, "纪要处理失败，记录已保留，请稍后重试。")
+        LOGGER.exception("处理纪要附件失败：message_id=%s", message.message_id)
+        await _reply(channel, message, "附件处理失败，请重新发送或联系管理员。")
         return
     await _reply(channel, message, result.text)
-    await _reply_file(channel, message, result)

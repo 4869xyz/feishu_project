@@ -6,10 +6,24 @@ from types import SimpleNamespace
 
 import pytest
 from docx import Document
+from lark_channel.channel.types import (
+    Conversation,
+    Identity,
+    ImageContent,
+    InboundMessage,
+    ResourceDescriptor,
+    TextContent,
+)
 
 from feishu_bot_listener import INSTANCE_LOCK_FILENAME as SALES_LOCK_FILENAME
 from meeting_minutes_bot.document import MinutesDocumentRenderer, MinutesTemplateError
-from meeting_minutes_bot.listener import create_channel, handle_message, message_open_id, message_text
+from meeting_minutes_bot.listener import (
+    create_channel,
+    handle_message,
+    message_kind,
+    message_open_id,
+    message_text,
+)
 from meeting_minutes_bot.runtime import INSTANCE_LOCK_FILENAME, single_instance_lock
 from meeting_minutes_bot.settings import MeetingBotSettings
 from tests.meeting_minutes.helpers import build_service, people_directory
@@ -48,8 +62,35 @@ def test_listener_extracts_normalized_and_raw_message_shapes() -> None:
     assert message_open_id(raw) == "ou_two"
     assert message_text(raw) == "另一段"
 
+    inbound = InboundMessage(
+        id="om_real",
+        create_time=0,
+        conversation=Conversation(chat_id="oc_real", chat_type="p2p"),
+        sender=Identity(open_id="ou_real"),
+        content=TextContent(text="SDK 正文"),
+        content_text="SDK 正文",
+        raw_content_type="text",
+    )
+    assert message_open_id(inbound) == "ou_real"
+    assert message_text(inbound) == "SDK 正文"
+    assert message_kind(inbound) == "text"
 
-def test_listener_replies_to_text_and_rejects_files(project_tmp_dir: Path) -> None:
+    image = InboundMessage(
+        id="om_image",
+        create_time=0,
+        conversation=Conversation(chat_id="oc_real", chat_type="p2p"),
+        sender=Identity(open_id="ou_real"),
+        content=ImageContent(image_key="img_real"),
+        resources=[ResourceDescriptor(type="image", file_key="img_real")],
+        raw_content_type="image",
+    )
+    assert message_open_id(image) == "ou_real"
+    assert message_kind(image) == "image"
+
+
+def test_listener_replies_to_text_and_requires_attachment_processor(
+    project_tmp_dir: Path,
+) -> None:
     async def scenario() -> None:
         service, repository = await build_service(project_tmp_dir)
         channel = FakeChannel()
@@ -76,7 +117,7 @@ def test_listener_replies_to_text_and_rejects_files(project_tmp_dir: Path) -> No
                 ),
             )
             assert "已收到" in channel.calls[0][1]["text"]
-            assert "仅支持直接发送文字" in channel.calls[1][1]["text"]
+            assert "附件识别功能尚未初始化" in channel.calls[1][1]["text"]
         finally:
             await repository.close()
 

@@ -16,7 +16,7 @@
 | `services.aggregation_batch_store` | 按聊天和发送人持久化临时批次、固定云表、latest 缓存和输出路径，并迁移 v1 状态。 | 标准库 |
 | `services.download_cache` | 只在配置的缓存根目录内删除非活动文件，并保护活动批次和显式保护路径。 | 标准库 |
 | `feishu_bot_listener.py` | 配置消息准入、日志和单实例锁，创建长连接、串行编排并把结果或文件转换为飞书回复。 | `config`、`clients`、`services`、`lark-channel-sdk` |
-| `meeting_minutes_bot` | 独立读取 `.env.meeting-minutes` 和人员 YAML，处理私聊文字、幂等入库、权限命令与版本化 DOCX 生成。 | `lark-channel-sdk`、SQLAlchemy、aiosqlite、PyYAML、docxtpl、标准库 |
+| `meeting_minutes_bot` | 独立读取 `.env.meeting-minutes` 和人员 YAML，处理私聊文字及附件、本地 OCR、幂等入库、权限命令与版本化 DOCX 生成。 | `lark-channel-sdk`、SQLAlchemy、aiosqlite、PyYAML、docxtpl、PyMuPDF、RapidOCR、ONNX Runtime |
 | `packaging/windows` | 使用 PyInstaller 生成免 Python 的 Windows x64 便携程序，并提供中文启动、停止和日志入口。 | 项目入口、当前 `.env`、汇总模板、PowerShell |
 | `tests` | 使用 fake/mock 验证配置、API 参数、解析、归档和回复。 | 被测模块、`pytest` |
 
@@ -89,6 +89,8 @@ Windows 便携交付先在开发机执行 `packaging/windows/build_portable.ps1`
        -> 管理员：查看本周提交状态 / 生成本周纪要
             -> 按 Asia/Shanghai ISO 周查询有效提交
             -> 按 template_key 渲染正式模板
+            -> data/meeting_minutes/attachments/（7 天本地附件缓存）
+            -> 图片 OCR / PDF 文字层 / DOCX / Markdown 提取
             -> data/meeting_minutes/output/<周期>_v<版本>_<时间戳>.docx
             -> meeting_documents 保存版本、状态和路径
        -> 回复文字或 DOCX

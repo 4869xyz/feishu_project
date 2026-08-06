@@ -13,6 +13,11 @@ from dotenv import dotenv_values
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 DEFAULT_ENV_FILE = PROJECT_ROOT / ".env.meeting-minutes"
 VALID_LOG_LEVELS = {"CRITICAL", "ERROR", "WARNING", "INFO", "DEBUG"}
+DEFAULT_MAX_ATTACHMENT_BYTES = 20 * 1024 * 1024
+DEFAULT_MAX_PDF_PAGES = 50
+DEFAULT_RETENTION_DAYS = 14
+DEFAULT_ATTACHMENT_CACHE_TTL_SECONDS = DEFAULT_RETENTION_DAYS * 24 * 60 * 60
+DEFAULT_ATTACHMENT_CACHE_MAX_BYTES = 512 * 1024 * 1024
 
 
 class MeetingBotConfigurationError(ValueError):
@@ -32,6 +37,12 @@ class MeetingBotSettings:
     timezone: str
     max_text_length: int
     log_level: str
+    attachment_dir: Path | None = None
+    max_attachment_bytes: int = DEFAULT_MAX_ATTACHMENT_BYTES
+    max_pdf_pages: int = DEFAULT_MAX_PDF_PAGES
+    retention_days: int = DEFAULT_RETENTION_DAYS
+    attachment_cache_ttl_seconds: int = DEFAULT_ATTACHMENT_CACHE_TTL_SECONDS
+    attachment_cache_max_bytes: int = DEFAULT_ATTACHMENT_CACHE_MAX_BYTES
 
 
 def _project_path(value: str, root: Path) -> Path:
@@ -130,9 +141,50 @@ def load_settings(
             f"无效的 MEETING_BOT_TIMEZONE：{timezone}"
         ) from exc
 
+    def positive_int(name: str, default: int) -> int:
+        try:
+            value = int(values.get(name, str(default)).strip())
+        except ValueError as exc:
+            raise MeetingBotConfigurationError(f"{name} 必须是正整数") from exc
+        if value <= 0:
+            raise MeetingBotConfigurationError(f"{name} 必须是正整数")
+        return value
+
+    max_attachment_bytes = positive_int(
+        "MEETING_BOT_MAX_ATTACHMENT_BYTES", DEFAULT_MAX_ATTACHMENT_BYTES
+    )
+    if max_attachment_bytes > 100 * 1024 * 1024:
+        raise MeetingBotConfigurationError(
+            "MEETING_BOT_MAX_ATTACHMENT_BYTES 不能超过 100 MB"
+        )
+    max_pdf_pages = positive_int("MEETING_BOT_MAX_PDF_PAGES", DEFAULT_MAX_PDF_PAGES)
+    retention_days = positive_int("MEETING_BOT_RETENTION_DAYS", DEFAULT_RETENTION_DAYS)
+    if retention_days > 3650:
+        raise MeetingBotConfigurationError(
+            "MEETING_BOT_RETENTION_DAYS 不能超过 3650 天"
+        )
+    if "MEETING_BOT_RETENTION_DAYS" in values:
+        attachment_cache_ttl_seconds = retention_days * 24 * 60 * 60
+    else:
+        attachment_cache_ttl_seconds = positive_int(
+            "MEETING_BOT_ATTACHMENT_CACHE_TTL_SECONDS",
+            retention_days * 24 * 60 * 60,
+        )
+    attachment_cache_max_bytes = positive_int(
+        "MEETING_BOT_ATTACHMENT_CACHE_MAX_BYTES",
+        DEFAULT_ATTACHMENT_CACHE_MAX_BYTES,
+    )
+    if attachment_cache_max_bytes < max_attachment_bytes:
+        raise MeetingBotConfigurationError(
+            "MEETING_BOT_ATTACHMENT_CACHE_MAX_BYTES 不能小于单附件大小限制"
+        )
+
+    attachment_dir = data_dir / "attachments"
+
     try:
         data_dir.mkdir(parents=True, exist_ok=True)
         output_dir.mkdir(parents=True, exist_ok=True)
+        attachment_dir.mkdir(parents=True, exist_ok=True)
         log_dir.mkdir(parents=True, exist_ok=True)
     except OSError as exc:
         raise MeetingBotConfigurationError(f"无法创建纪要机器人运行目录：{exc}") from exc
@@ -151,4 +203,10 @@ def load_settings(
         timezone=timezone,
         max_text_length=max_text_length,
         log_level=log_level,
+        attachment_dir=attachment_dir,
+        max_attachment_bytes=max_attachment_bytes,
+        max_pdf_pages=max_pdf_pages,
+        retention_days=retention_days,
+        attachment_cache_ttl_seconds=attachment_cache_ttl_seconds,
+        attachment_cache_max_bytes=attachment_cache_max_bytes,
     )

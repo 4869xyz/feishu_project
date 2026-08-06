@@ -7,6 +7,7 @@ from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
 
+from .attachments import ExtractedAttachment
 from .document import MinutesDocumentRenderer
 from .people import PeopleDirectory, Person
 from .period import local_datetime, meeting_period, period_label
@@ -54,6 +55,12 @@ class MeetingMinutesService:
             return None, ServiceResult("你的周例会纪要账号当前已停用，请联系管理员。")
         return person, None
 
+    def submission_rejection(self, open_id: str) -> ServiceResult | None:
+        """Return a user-facing rejection before an attachment is downloaded."""
+
+        _, rejection = self._person_or_reply(open_id)
+        return rejection
+
     async def handle_text(
         self,
         *,
@@ -89,7 +96,67 @@ class MeetingMinutesService:
             content = cleaned[3:].strip()
         if not content:
             return ServiceResult("纪要内容不能为空。")
-        if len(content) > self.max_text_length:
+        return await self._submit_content(
+            message_id=message_id,
+            person=person,
+            period=period,
+            raw_content=content,
+            parsed_content=content,
+            message_type="text",
+            mode=mode,
+        )
+
+    async def handle_attachment(
+        self,
+        *,
+        message_id: str,
+        sender_open_id: str,
+        attachment: ExtractedAttachment,
+        received_at: datetime | None = None,
+    ) -> ServiceResult:
+        now = local_datetime(received_at, self.timezone)
+        period = meeting_period(now, self.timezone)
+        person, rejection = self._person_or_reply(sender_open_id)
+        if rejection is not None or person is None:
+            return rejection or ServiceResult("人员身份校验失败。")
+
+        result = await self._submit_content(
+            message_id=message_id,
+            person=person,
+            period=period,
+            raw_content=attachment.raw_content,
+            parsed_content=attachment.parsed_content,
+            message_type=attachment.message_type,
+            mode="append",
+        )
+        if result.duplicate or not result.text.startswith("已收到"):
+            return result
+        return ServiceResult(
+            "已识别并追加你的周例会纪要。\n"
+            f"姓名：{person.name}\n"
+            f"部门：{person.department}\n"
+            f"周期：{period_label(period)}\n"
+            f"文件：{attachment.file_name}\n"
+            f"类型：{attachment.message_type.upper()}\n"
+            f"识别方式：{attachment.recognition_method}\n"
+            f"识别字数：{attachment.character_count}\n"
+            f"内容预览：{attachment.preview}"
+        )
+
+    async def _submit_content(
+        self,
+        *,
+        message_id: str,
+        person: Person,
+        period: str,
+        raw_content: str,
+        parsed_content: str,
+        message_type: str,
+        mode: str,
+    ) -> ServiceResult:
+        if not parsed_content:
+            return ServiceResult("纪要内容不能为空。")
+        if len(parsed_content) > self.max_text_length:
             return ServiceResult(
                 f"纪要内容超过 {self.max_text_length} 字限制，请拆分后重新发送。"
             )
@@ -102,7 +169,9 @@ class MeetingMinutesService:
                 message_id=message_id,
                 period=period,
                 person=person,
-                content=content,
+                raw_content=raw_content,
+                parsed_content=parsed_content,
+                message_type=message_type,
                 mode=mode,
             )
         except Exception as exc:
@@ -115,7 +184,7 @@ class MeetingMinutesService:
             f"部门：{person.department}\n"
             f"周期：{period_label(period)}\n"
             f"处理方式：{'替换' if mode == 'replace' else '追加'}\n"
-            "消息类型：文字"
+            f"消息类型：{'文字' if message_type == 'text' else message_type.upper()}"
         )
 
     async def _view(self, person: Person, period: str) -> ServiceResult:

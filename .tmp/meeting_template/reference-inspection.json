@@ -1,0 +1,496 @@
+﻿{
+  "reference": "F:\\Dene_internship\\0805meeting_minutes\\�������Ҫ.docx",
+  "sha256": "d3e1673e4bef5a60f1aca9600680d6d11d0c08f330518dffaf5e5a5269292666",
+  "sections": [
+    {
+      "page_width": 7560310,
+      "page_height": 10692130,
+      "top_margin": 914400,
+      "bottom_margin": 914400,
+      "left_margin": 1143000,
+      "right_margin": 1143000,
+      "header_distance": 540385,
+      "footer_distance": 629920
+    }
+  ],
+  "paragraphs": [
+    {
+      "text": "�������Ҫ",
+      "style": "Normal",
+      "alignment": "CENTER (1)",
+      "runs": [
+        {
+          "text": "�������Ҫ",
+          "bold": true,
+          "italic": null,
+          "font": null,
+          "size_pt": 14.0
+        }
+      ]
+    },
+    {
+      "text": "һ���ܾ���",
+      "style": "Normal",
+      "alignment": "JUSTIFY (3)",
+      "runs": [
+        {
+          "text": "һ���ܾ���",
+          "bold": true,
+          "italic": null,
+          "font": null,
+          "size_pt": 14.0
+        }
+      ]
+    },
+    {
+      "text": "",
+      "style": "Heading 1",
+      "alignment": "LEFT (0)",
+      "runs": []
+    },
+    {
+      "text": "��������-������",
+      "style": "Heading 1",
+      "alignment": "LEFT (0)",
+      "runs": [
+        {
+          "text": "��������-������",
+          "bold": null,
+          "italic": null,
+          "font": null,
+          "size_pt": null
+        }
+      ]
+    },
+    {
+      "text": "1�������",
+      "style": "Normal",
+      "alignment": "None",
+      "runs": [
+        {
+          "text": "1�������",
+          "bold": true,
+          "italic": null,
+          "font": null,
+          "size_pt": null
+        }
+      ]
+    },
+    {
+      "text": "",
+      "style": "Normal",
+      "alignment": "None",
+      "runs": []
+    },
+    {
+      "text": "",
+      "style": "Normal",
+      "alignment": "None",
+      "runs": []
+    },
+    {
+      "text": "2��������",
+      "style": "Normal",
+      "alignment": "None",
+      "runs": [
+        {
+          "text": "2��������",
+          "bold": true,
+          "italic": null,
+          "font": null,
+          "size_pt": null
+        }
+      ]
+    },
+    {
+      "text": "",
+      "style": "Normal",
+      "alignment": "None",
+      "runs": []
+    },
+    {
+      "text": "��������������Ҷ���棩",
+      "style": "Heading 1",
+      "alignment": "JUSTIFY (3)",
+      "runs": [
+        {
+          "text": "������������",
+          "bold": true,
+          "italic": null,
+          "font": null,
+          "size_pt": null
+        },
+        {
+          "text": "��Ҷ���棩",
+          "bold": true,
+          "italic": null,
+          "font": null,
+          "size_pt": null
+        }
+      ]
+    },
+    {
+      "text": "",
+      "style": "Normal",
+      "alignment": "LEFT (0)",
+      "runs": []
+    },
+    {
+      "text": "�ġ���̨���ŷ�����",
+      "style": "Heading 1",
+      "alignment": "LEFT (0)",
+      "runs": [
+        {
+          "text": "��",
+          "bold": true,
+          "italic": null,
+          "font": null,
+          "size_pt": 14.0
+        },
+        {
+          "text": "��",
+          "bold": true,
+          "italic": null,
+          "font": null,
+          "size_pt": 14.0
+        },
+        {
+          "text": "��̨",
+          "bold": true,
+          "italic": null,
+          "font": null,
+          "size_pt": null
+        },
+        {
+          "text": "���ŷ�����",
+          "bold": true,
+          "italic": null,
+          "font": null,
+          "size_pt": null
+        }
+      ]
+    },
+    {
+      "text": "",
+      "style": "Normal",
+      "alignment": "None",
+      "runs": []
+    },
+    {
+      "text": "�塢��Ӫ�ƹ��飨�ְ�����",
+      "style": "Heading 1",
+      "alignment": "LEFT (0)",
+      "runs": [
+        {
+          "text": "��",
+          "bold": false,
+          "italic": null,
+          "font": null,
+          "size_pt": 14.0
+        },
+        {
+          "text": "��",
+          "bold": false,
+          "italic": null,
+          "font": null,
+          "size_pt": 14.0
+        },
+        {
+          "text": "��Ӫ�ƹ���",
+          "bold": true,
+          "italic": null,
+          "font": null,
+          "size_pt": null
+        },
+        {
+          "text": "���ְ�����",
+          "bold": true,
+          "italic": null,
+          "font": null,
+          "size_pt": null
+        }
+      ]
+    },
+    {
+      "text": "",
+      "style": "Normal",
+      "alignment": "None",
+      "runs": []
+    },
+    {
+      "text": "",
+      "style": "Normal",
+      "alignment": "None",
+      "runs": []
+    },
+    {
+      "text": "�������ڲ�",
+      "style": "Heading 1",
+      "alignment": "LEFT (0)",
+      "runs": [
+        {
+          "text": "��",
+          "bold": true,
+          "italic": null,
+          "font": null,
+          "size_pt": 14.0
+        },
+        {
+          "text": "��",
+          "bold": true,
+          "italic": null,
+          "font": null,
+          "size_pt": 14.0
+        },
+        {
+          "text": "���ڲ�",
+          "bold": null,
+          "italic": null,
+          "font": null,
+          "size_pt": null
+        }
+      ]
+    },
+    {
+      "text": "",
+      "style": "Normal",
+      "alignment": "None",
+      "runs": []
+    },
+    {
+      "text": "1��������",
+      "style": "Normal",
+      "alignment": "None",
+      "runs": [
+        {
+          "text": "1��������",
+          "bold": true,
+          "italic": null,
+          "font": null,
+          "size_pt": null
+        }
+      ]
+    },
+    {
+      "text": "",
+      "style": "Normal",
+      "alignment": "None",
+      "runs": []
+    },
+    {
+      "text": "2�������",
+      "style": "Normal",
+      "alignment": "None",
+      "runs": [
+        {
+          "text": "2�������",
+          "bold": true,
+          "italic": null,
+          "font": null,
+          "size_pt": null
+        }
+      ]
+    },
+    {
+      "text": "",
+      "style": "Normal",
+      "alignment": "None",
+      "runs": []
+    },
+    {
+      "text": "�ߡ������� ",
+      "style": "Heading 1",
+      "alignment": "LEFT (0)",
+      "runs": [
+        {
+          "text": "��",
+          "bold": true,
+          "italic": null,
+          "font": null,
+          "size_pt": 14.0
+        },
+        {
+          "text": "��",
+          "bold": true,
+          "italic": null,
+          "font": null,
+          "size_pt": 14.0
+        },
+        {
+          "text": "������",
+          "bold": null,
+          "italic": null,
+          "font": null,
+          "size_pt": null
+        },
+        {
+          "text": " ",
+          "bold": null,
+          "italic": null,
+          "font": null,
+          "size_pt": null
+        }
+      ]
+    },
+    {
+      "text": "1��������",
+      "style": "Normal",
+      "alignment": "None",
+      "runs": [
+        {
+          "text": "1��������",
+          "bold": true,
+          "italic": null,
+          "font": null,
+          "size_pt": null
+        }
+      ]
+    },
+    {
+      "text": "",
+      "style": "Normal",
+      "alignment": "LEFT (0)",
+      "runs": []
+    },
+    {
+      "text": "2���߲ӽ�",
+      "style": "Normal",
+      "alignment": "None",
+      "runs": [
+        {
+          "text": "2���߲ӽ�",
+          "bold": true,
+          "italic": null,
+          "font": null,
+          "size_pt": null
+        }
+      ]
+    },
+    {
+      "text": "",
+      "style": "Normal",
+      "alignment": "None",
+      "runs": []
+    },
+    {
+      "text": "3�������",
+      "style": "Normal",
+      "alignment": "None",
+      "runs": [
+        {
+          "text": "3�������",
+          "bold": true,
+          "italic": null,
+          "font": null,
+          "size_pt": null
+        }
+      ]
+    },
+    {
+      "text": "",
+      "style": "Normal",
+      "alignment": "None",
+      "runs": []
+    },
+    {
+      "text": "�ˡ�����",
+      "style": "Heading 1",
+      "alignment": "LEFT (0)",
+      "runs": [
+        {
+          "text": "��",
+          "bold": true,
+          "italic": null,
+          "font": null,
+          "size_pt": 14.0
+        },
+        {
+          "text": "��",
+          "bold": true,
+          "italic": null,
+          "font": null,
+          "size_pt": 14.0
+        },
+        {
+          "text": "����",
+          "bold": null,
+          "italic": null,
+          "font": null,
+          "size_pt": null
+        }
+      ]
+    },
+    {
+      "text": "1�������",
+      "style": "Normal",
+      "alignment": "LEFT (0)",
+      "runs": [
+        {
+          "text": "1�������",
+          "bold": true,
+          "italic": null,
+          "font": null,
+          "size_pt": 10.5
+        }
+      ]
+    },
+    {
+      "text": "",
+      "style": "Normal",
+      "alignment": "None",
+      "runs": []
+    },
+    {
+      "text": "2���Ŵ���",
+      "style": "Normal",
+      "alignment": "None",
+      "runs": [
+        {
+          "text": "2���Ŵ���",
+          "bold": true,
+          "italic": null,
+          "font": null,
+          "size_pt": null
+        }
+      ]
+    },
+    {
+      "text": "",
+      "style": "Normal",
+      "alignment": "None",
+      "runs": []
+    }
+  ],
+  "tables": [],
+  "headers": [
+    [
+      {
+        "text": "",
+        "style": "Normal",
+        "alignment": "None",
+        "runs": []
+      }
+    ]
+  ],
+  "footers": [
+    [
+      {
+        "text": "",
+        "style": "Normal",
+        "alignment": "None",
+        "runs": []
+      }
+    ]
+  ],
+  "inline_shapes": 0,
+  "styles": [
+    "Normal",
+    "Heading 1",
+    "Heading 4",
+    "Default Paragraph Font",
+    "Normal Table",
+    "toc 1",
+    "Normal (Web)",
+    "List Paragraph"
+  ]
+}

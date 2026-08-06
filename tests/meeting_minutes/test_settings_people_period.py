@@ -27,12 +27,64 @@ def test_settings_are_isolated_from_sales_bot_variables(project_tmp_dir: Path) -
     assert "meeting-secret" not in repr(settings)
     assert settings.data_dir == project_tmp_dir / "data" / "meeting_minutes"
     assert settings.log_dir == project_tmp_dir / "logs" / "meeting_minutes"
+    assert settings.attachment_dir == project_tmp_dir / "data" / "meeting_minutes" / "attachments"
+    assert settings.max_attachment_bytes == 20 * 1024 * 1024
+    assert settings.max_pdf_pages == 50
+    assert settings.retention_days == 14
+    assert settings.attachment_cache_ttl_seconds == 14 * 24 * 60 * 60
+    assert settings.attachment_cache_max_bytes == 512 * 1024 * 1024
     assert "meeting_minutes.db" in settings.database_url
 
 
 def test_settings_require_only_meeting_bot_credentials(project_tmp_dir: Path) -> None:
     with pytest.raises(MeetingBotConfigurationError, match="MEETING_BOT_FEISHU_APP_ID"):
         load_settings(env_file=None, environ={}, project_root=project_tmp_dir)
+
+
+def test_attachment_settings_are_validated(project_tmp_dir: Path) -> None:
+    base = {
+        "MEETING_BOT_FEISHU_APP_ID": "meeting-app",
+        "MEETING_BOT_FEISHU_APP_SECRET": "meeting-secret",
+        "MEETING_BOT_PEOPLE_CONFIG_PATH": str(project_tmp_dir / "people.yaml"),
+        "MEETING_BOT_TEMPLATE_PATH": str(project_tmp_dir / "template.docx"),
+    }
+    with pytest.raises(MeetingBotConfigurationError, match="不能超过 100 MB"):
+        load_settings(
+            env_file=None,
+            environ={
+                **base,
+                "MEETING_BOT_MAX_ATTACHMENT_BYTES": str(101 * 1024 * 1024),
+            },
+            project_root=project_tmp_dir,
+        )
+    with pytest.raises(MeetingBotConfigurationError, match="不能小于"):
+        load_settings(
+            env_file=None,
+            environ={
+                **base,
+                "MEETING_BOT_MAX_ATTACHMENT_BYTES": str(2 * 1024 * 1024),
+                "MEETING_BOT_ATTACHMENT_CACHE_MAX_BYTES": str(1024 * 1024),
+            },
+            project_root=project_tmp_dir,
+        )
+
+
+def test_retention_days_override_legacy_attachment_ttl(project_tmp_dir: Path) -> None:
+    settings = load_settings(
+        env_file=None,
+        environ={
+            "MEETING_BOT_FEISHU_APP_ID": "meeting-app",
+            "MEETING_BOT_FEISHU_APP_SECRET": "meeting-secret",
+            "MEETING_BOT_PEOPLE_CONFIG_PATH": str(project_tmp_dir / "people.yaml"),
+            "MEETING_BOT_TEMPLATE_PATH": str(project_tmp_dir / "template.docx"),
+            "MEETING_BOT_RETENTION_DAYS": "14",
+            "MEETING_BOT_ATTACHMENT_CACHE_TTL_SECONDS": "604800",
+        },
+        project_root=project_tmp_dir,
+    )
+
+    assert settings.retention_days == 14
+    assert settings.attachment_cache_ttl_seconds == 14 * 24 * 60 * 60
 
 
 def test_people_config_validates_identity_and_order(project_tmp_dir: Path) -> None:

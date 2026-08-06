@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from contextlib import contextmanager
 import logging
+from logging.handlers import TimedRotatingFileHandler
 import os
 from pathlib import Path
 from typing import Any, Iterator
@@ -22,8 +23,12 @@ def configure_logging(settings: MeetingBotSettings) -> None:
     formatter = logging.Formatter("%(asctime)s %(levelname)s %(name)s: %(message)s")
     handlers: tuple[logging.Handler, ...] = (
         logging.StreamHandler(),
-        logging.FileHandler(
-            settings.log_dir / "meeting_minutes_bot.log", encoding="utf-8"
+        TimedRotatingFileHandler(
+            settings.log_dir / "meeting_minutes_bot.log",
+            when="midnight",
+            interval=1,
+            backupCount=settings.retention_days,
+            encoding="utf-8",
         ),
     )
     for handler in handlers:
