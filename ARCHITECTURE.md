@@ -2,7 +2,7 @@
 
 ## 项目定位
 
-这是一个 Python 3.11 双飞书机器人仓库：原销售机器人接收 Excel 附件或 Sheets/Wiki 链接并生成销售汇总；独立的周例会纪要机器人接收员工私聊文字，以 SQLite 保存可追溯提交，并由管理员生成 DOCX。两者使用不同飞书应用、配置、入口、锁、日志和数据目录。
+这是一个 Python 3.11 双飞书机器人仓库：原销售机器人接收 Excel 附件或 Sheets/Wiki 链接并生成销售汇总；独立的周例会纪要机器人接收员工私聊文字、图片和受支持的文档附件，以 SQLite 保存可追溯提交，并由管理员生成 DOCX。两者使用不同飞书应用、配置、入口、锁、日志和数据目录。
 
 ## 模块边界与依赖方向
 
@@ -85,15 +85,18 @@ Windows 便携交付先在开发机执行 `packaging/windows/build_portable.ps1`
        -> message_id 写入 meeting_events，重复事件不再执行
        -> 普通文字 / 替换：内容
             -> meeting_submissions 保留人员快照、原文、模式、状态和有效标记
+       -> 图片 / PDF / DOCX / Markdown
+            -> data/meeting_minutes/attachments/（默认 14 天本地附件缓存）
+            -> 图片 OCR / PDF 文字层 / DOCX / Markdown 提取
+            -> meeting_submissions 保存原文、识别文本和消息类型
        -> 查看我的纪要 / 撤回本周提交
        -> 管理员：查看本周提交状态 / 生成本周纪要
             -> 按 Asia/Shanghai ISO 周查询有效提交
             -> 按 template_key 渲染正式模板
-            -> data/meeting_minutes/attachments/（7 天本地附件缓存）
-            -> 图片 OCR / PDF 文字层 / DOCX / Markdown 提取
             -> data/meeting_minutes/output/<周期>_v<版本>_<时间戳>.docx
             -> meeting_documents 保存版本、状态和路径
        -> 回复文字或 DOCX
+  -> 启动时及每 24 小时清理超过保留期的附件、数据库记录和 DOCX
   -> logs/meeting_minutes/meeting_minutes_bot.log
 ```
 
@@ -136,7 +139,7 @@ Windows 便携交付先在开发机执行 `packaging/windows/build_portable.ps1`
 ## 运行产物与安全
 
 - `.env`、日志、`logs/*.lock`、`data/inbox/` 实际附件、`data/archive/` 实际导出文件和 `data/aggregation/` 状态/结果都不得提交到 Git。
-- `.env.meeting-minutes`、真实人员 YAML、`data/meeting_minutes/` SQLite/DOCX 和 `logs/meeting_minutes/` 同样不得提交；只提交无真实 open_id 的示例配置和测试模板。
+- `.env.meeting-minutes`、真实人员 YAML、`data/meeting_minutes/` SQLite/DOCX 和 `logs/meeting_minutes/` 同样不得提交；只提交无真实 `open_id` 的示例配置和经过审核的模板。
 - `data/inbox/.gitkeep`、`data/archive/.gitkeep` 和 `data/aggregation/.gitkeep` 仅保存目录结构。
 - 日志和异常必须脱敏，不输出 App Secret、完整 tenant token、完整文件内容或业务数据。
 - 飞书开放平台 API Scope 与具体 Wiki 节点/文档共享权限是独立条件；两者都满足才能解析和导出 Wiki 表格。

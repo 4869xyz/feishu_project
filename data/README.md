@@ -11,7 +11,7 @@
 | `data/aggregation/output/` | 自动生成的销售汇总 XLSX，按月份和批次所有者哈希分目录。 | 忽略实际文件。 |
 | `data/meeting_minutes/meeting_minutes.db` | 第二机器人独立的事件、提交和纪要版本数据库。 | 整个目录忽略。 |
 | `data/meeting_minutes/output/` | 管理员生成的版本化周例会纪要 DOCX。 | 整个目录忽略。 |
-| `data/meeting_minutes/attachments/` | 纪要机器人下载的图片和文档附件缓存，默认保留 7 天并受总容量限制。 | 整个目录忽略。 |
+| `data/meeting_minutes/attachments/` | 纪要机器人下载的图片和文档附件缓存，默认保留 14 天并受总容量限制。 | 整个目录忽略。 |
 
 归档文件名固定为：
 

@@ -1,0 +1,24 @@
+# open_id 在不同飞书自建应用中通常不同；请替换为纪要应用收到的真实值。
+# template_key 必须与 Word 模板中的 Jinja 占位符一致且不能重复。
+people:
+  ou_replace_employee_1:
+    name: 示例员工甲
+    department: 示例部门
+    template_key: employee_1
+    section_order: 1
+    sort_order: 1
+    enabled: true
+    role: employee
+
+  ou_replace_employee_2:
+    name: 示例员工乙
+    department: 示例部门
+    template_key: employee_2
+    section_order: 1
+    sort_order: 2
+    enabled: true
+    role: admin
+
+# 只有此列表中的 open_id 可以执行“生成本周纪要”和“查看本周提交状态”。
+admins:
+  - ou_replace_employee_2

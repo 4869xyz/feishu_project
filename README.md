@@ -1,8 +1,13 @@
-# 飞书销售表格收件机器人
+# 飞书销售汇总与周例会纪要机器人
 
-> 仓库同时包含一个相互隔离的“周例会纪要机器人”。其配置、命令和源码启动方式见 [`docs/meeting_minutes/README.md`](docs/meeting_minutes/README.md)。现有销售机器人行为不变。
+这是一个包含两个相互隔离的 Python 3.11 飞书长连接机器人的仓库：
 
-这是一个 Python 3.11 飞书长连接机器人。它会接收聊天中直接上传的 Excel 附件，或用户发送的飞书 Sheets/Wiki 表格链接，校验并暂存销售数据文件，再按既定 SOP 生成签约汇总 Excel 并发送回当前会话。
+| 机器人 | 入口 | 主要能力 | 详细文档 |
+| --- | --- | --- | --- |
+| 销售汇总机器人 | `python feishu_bot_listener.py` | 接收 Excel 或 Sheets/Wiki 链接，按既定 SOP 生成签约汇总 Excel。 | 本 README |
+| 周例会纪要机器人 | `python -m meeting_minutes_bot` | 接收私聊文字、图片、文字型 PDF、DOCX 和 Markdown，保存可追溯提交并由管理员生成版本化 DOCX。 | [周例会纪要机器人说明](docs/meeting_minutes/README.md) |
+
+两者使用不同的飞书应用、配置文件、数据目录、日志和进程锁，可以同时运行；新增纪要功能不会改变原销售机器人的行为。
 
 ## 当前能力
 
@@ -30,14 +35,17 @@
 ├── config/                   # 环境配置、路径解析和目录初始化
 ├── clients/                  # 飞书 HTTP API、附件和表格链接处理
 ├── services/                 # 销售工作簿校验、汇总和批次状态
+├── meeting_minutes_bot/      # 独立的周例会纪要机器人
 ├── data/inbox/               # 直接上传附件的本地收件箱（Git 忽略）
 ├── data/archive/             # 链接导出的归档目录（Git 忽略）
 ├── data/aggregation/         # 批次状态、固定云表 latest 缓存和生成结果（Git 忽略）
+├── data/meeting_minutes/     # 纪要数据库、附件缓存和 DOCX 输出（Git 忽略）
 ├── logs/                     # 本地日志（Git 忽略）
 ├── tests/                    # 不访问真实飞书的 pytest 测试
 ├── packaging/windows/        # Windows 便携包构建与一键启动脚本
 ├── release/                  # 本地发布产物（Git 忽略，包含当前 .env）
 ├── docs/plans/               # 功能计划和执行记录
+├── docs/meeting_minutes/     # 周例会纪要机器人使用说明
 ├── ARCHITECTURE.md           # 架构地图
 └── VersionLog.md             # 实质变更日志
 ```
@@ -51,6 +59,16 @@ python -m pip install -r requirements.txt
 copy .env.example .env
 .venv\Scripts\python.exe feishu_bot_listener.py
 ```
+
+上述命令启动销售机器人。纪要机器人需另行复制 `.env.meeting-minutes.example` 和人员配置示例，完成配置后启动：
+
+```powershell
+copy .env.meeting-minutes.example .env.meeting-minutes
+copy meeting_minutes_bot\config\people.example.yaml meeting_minutes_bot\config\people.yaml
+.venv\Scripts\python.exe -m meeting_minutes_bot
+```
+
+完整配置、支持的附件、飞书命令和数据保留策略见[周例会纪要机器人说明](docs/meeting_minutes/README.md)。
 
 ### Windows 免安装便携包
 
@@ -208,11 +226,12 @@ wiki:wiki:readonly
 
 测试全部使用 fake/mock，不访问真实飞书、不使用真实凭据，也不会改动真实下载文件。
 
-当前完整基线：**103 项测试通过**。此外，汇总结果会通过 Microsoft Excel 兼容重开和可视检查验证签约公式、源字体颜色、非空关键字段黄色/橙色明细隐藏、金额格式、自适应列宽与模板布局。
+测试基线以 [`tests/README.md`](tests/README.md) 为准。此外，销售汇总结果会通过 Microsoft Excel 兼容重开和可视检查验证签约公式、源字体颜色、非空关键字段黄色/橙色明细隐藏、金额格式、自适应列宽与模板布局。
 
 ## 工程协作与文档入口
 
 - [架构地图](ARCHITECTURE.md)：模块边界、依赖方向和两条数据流。
+- [周例会纪要机器人说明](docs/meeting_minutes/README.md)：纪要机器人的配置、命令、附件限制和数据保留规则。
 - [功能计划模板](docs/templates/feature-plan-template.md)：新增功能先写范围、决策、原子 Checklist 和验收。
 - [功能计划目录说明](docs/plans/README.md)：计划的命名、状态和归档规则。
 - [本次表格链接导出计划](docs/plans/2026-07-14_feishu-table-link-export_plan.md)：已完成的实现记录与验收证据。
