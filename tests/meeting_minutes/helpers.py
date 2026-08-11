@@ -54,10 +54,13 @@ async def build_service(root: Path) -> tuple[MeetingMinutesService, MeetingRepos
     repository = MeetingRepository(f"sqlite+aiosqlite:///{database.as_posix()}")
     await repository.initialize()
     people = people_directory()
+    data_dir = root / "data"
+    data_dir.mkdir(parents=True, exist_ok=True)
     renderer = MinutesDocumentRenderer(
         template_path=TEST_TEMPLATE,
         output_dir=root / "output",
         people=people,
+        data_dir=data_dir,
     )
     return (
         MeetingMinutesService(
@@ -66,6 +69,7 @@ async def build_service(root: Path) -> tuple[MeetingMinutesService, MeetingRepos
             renderer=renderer,
             timezone="Asia/Shanghai",
             max_text_length=100,
+            data_dir=data_dir,
         ),
         repository,
     )

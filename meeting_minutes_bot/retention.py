@@ -9,6 +9,7 @@ import logging
 import os
 from pathlib import Path
 
+from .docx_merge import submission_docs_root
 from .repository import DatabaseCleanupResult, MeetingRepository
 from .settings import MeetingBotSettings
 
@@ -29,7 +30,8 @@ class RetentionCleanupResult:
     cutoff: datetime
     attachments: FileCleanupResult
     documents: FileCleanupResult
-    database: DatabaseCleanupResult
+    submission_docs: FileCleanupResult = FileCleanupResult()
+    database: DatabaseCleanupResult = DatabaseCleanupResult(0, 0, 0)
     database_failed: bool = False
     vacuum_failed: bool = False
 
@@ -105,6 +107,9 @@ class RetentionCleaner:
         documents = await self._cleanup_files(
             self.settings.output_dir, "Word", cutoff
         )
+        submission_docs = await self._cleanup_files(
+            submission_docs_root(self.settings.data_dir), "提交源Word", cutoff
+        )
 
         database = DatabaseCleanupResult(0, 0, 0)
         database_failed = False
@@ -125,19 +130,25 @@ class RetentionCleaner:
             cutoff=cutoff,
             attachments=attachments,
             documents=documents,
+            submission_docs=submission_docs,
             database=database,
             database_failed=database_failed,
             vacuum_failed=vacuum_failed,
         )
         LOGGER.info(
-            "纪要保留期清理完成：cutoff=%s，附件=%d，Word=%d，数据库=%d，"
+            "纪要保留期清理完成：cutoff=%s，附件=%d，Word=%d，提交源Word=%d，数据库=%d，"
             "释放=%d bytes，文件失败=%d，数据库失败=%s，VACUUM失败=%s",
             cutoff.isoformat(),
             attachments.deleted,
             documents.deleted,
+            submission_docs.deleted,
             database.total,
-            attachments.released_bytes + documents.released_bytes,
-            attachments.failed + documents.failed,
+            (
+                attachments.released_bytes
+                + documents.released_bytes
+                + submission_docs.released_bytes
+            ),
+            attachments.failed + documents.failed + submission_docs.failed,
             database_failed,
             vacuum_failed,
         )

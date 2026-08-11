@@ -2,12 +2,17 @@ from __future__ import annotations
 
 from datetime import datetime, timezone
 from pathlib import Path
+import sys
 
 import pytest
 
 from meeting_minutes_bot.people import PeopleConfigurationError, load_people
 from meeting_minutes_bot.period import meeting_period
-from meeting_minutes_bot.settings import MeetingBotConfigurationError, load_settings
+from meeting_minutes_bot.settings import (
+    MeetingBotConfigurationError,
+    _runtime_project_root,
+    load_settings,
+)
 
 
 def test_settings_are_isolated_from_sales_bot_variables(project_tmp_dir: Path) -> None:
@@ -33,7 +38,29 @@ def test_settings_are_isolated_from_sales_bot_variables(project_tmp_dir: Path) -
     assert settings.retention_days == 14
     assert settings.attachment_cache_ttl_seconds == 14 * 24 * 60 * 60
     assert settings.attachment_cache_max_bytes == 512 * 1024 * 1024
+    assert settings.reminder_enabled is True
     assert "meeting_minutes.db" in settings.database_url
+
+
+def test_runtime_project_root_uses_frozen_executable_directory(
+    monkeypatch: pytest.MonkeyPatch,
+    project_tmp_dir: Path,
+) -> None:
+    """A packaged executable resolves config and runtime data beside itself."""
+
+    executable = project_tmp_dir / "MeetingMinutesBot.exe"
+    monkeypatch.setattr(sys, "frozen", True, raising=False)
+    monkeypatch.setattr(sys, "executable", str(executable))
+
+    assert _runtime_project_root() == project_tmp_dir.resolve()
+
+
+def test_runtime_project_root_uses_source_root_when_not_frozen(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.delattr(sys, "frozen", raising=False)
+
+    assert (_runtime_project_root() / "meeting_minutes_bot").is_dir()
 
 
 def test_settings_require_only_meeting_bot_credentials(project_tmp_dir: Path) -> None:

@@ -1,8 +1,10 @@
 # open_id 在不同飞书自建应用中通常不同；请替换为纪要应用收到的真实值。
 # template_key 必须与 Word 模板中的 Jinja 占位符一致且不能重复。
+# 修改本文件后，管理员私聊机器人发送“重载人员配置”即可免重启生效；
+# 离职将 enabled 改为 false，新人顶替旧岗位直接改绑该条目的 open_id 和 name。
 people:
-  ou_replace_employee_1:
-    name: 示例员工甲
+  ou_bbb41d7292315838843fd1c515845e58:
+    name: 朱飞
     department: 示例部门
     template_key: employee_1
     section_order: 1

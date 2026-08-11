@@ -16,8 +16,8 @@
 | `services.aggregation_batch_store` | 按聊天和发送人持久化临时批次、固定云表、latest 缓存和输出路径，并迁移 v1 状态。 | 标准库 |
 | `services.download_cache` | 只在配置的缓存根目录内删除非活动文件，并保护活动批次和显式保护路径。 | 标准库 |
 | `feishu_bot_listener.py` | 配置消息准入、日志和单实例锁，创建长连接、串行编排并把结果或文件转换为飞书回复。 | `config`、`clients`、`services`、`lark-channel-sdk` |
-| `meeting_minutes_bot` | 独立读取 `.env.meeting-minutes` 和人员 YAML，处理私聊文字及附件、本地 OCR、幂等入库、权限命令与版本化 DOCX 生成。 | `lark-channel-sdk`、SQLAlchemy、aiosqlite、PyYAML、docxtpl、PyMuPDF、RapidOCR、ONNX Runtime |
-| `packaging/windows` | 使用 PyInstaller 生成免 Python 的 Windows x64 便携程序，并提供中文启动、停止和日志入口。 | 项目入口、当前 `.env`、汇总模板、PowerShell |
+| `meeting_minutes_bot` | 独立读取 `.env.meeting-minutes` 和人员 YAML，处理私聊文字及附件、本地 OCR、幂等入库、权限命令、周日未提交提醒与版本化 DOCX 生成。 | `lark-channel-sdk`、SQLAlchemy、aiosqlite、PyYAML、docxtpl、PyMuPDF、RapidOCR、ONNX Runtime |
+| `packaging/windows` | 使用 PyInstaller 生成免 Python 的 Windows x64 便携程序，并提供中文启动、停止和日志入口。根目录面向销售机器人，`meeting/` 子目录面向纪要机器人，两套 spec、启动器和发布包相互独立。 | 项目入口、当前 `.env` 与 `.env.meeting-minutes`、汇总模板、纪要模板与人员 YAML、PowerShell |
 | `tests` | 使用 fake/mock 验证配置、API 参数、解析、归档和回复。 | 被测模块、`pytest` |
 
 依赖必须单向：`config` 不依赖 `clients`/`services`；`clients` 和 `services` 不依赖监听器；监听器只编排，不放入 HTTP、链接解析、汇总算法或文件命名细节。
@@ -27,6 +27,8 @@
 ## 运行数据流
 
 Windows 便携交付先在开发机执行 `packaging/windows/build_portable.ps1`，通过测试后把入口及运行依赖冻结到 `release/`。发布包外置复制当前 `.env` 和汇总模板；目标电脑双击启动脚本后，以 `FeishuSalesBot.exe` 所在目录作为项目根目录进入下述相同数据流。
+
+纪要机器人有独立的便携交付：`packaging/windows/meeting/build_meeting_portable.ps1` 以 `run_meeting_minutes_bot.py` 为入口冻结出 `MeetingMinutesBot.exe`，随包收集 RapidOCR 的 ONNX 模型、onnxruntime 与 PyMuPDF 原生库和 `tzdata`，并外置复制当前 `.env.meeting-minutes`、人员 YAML 与正式模板。发布包的 `data/meeting_minutes` 与 `logs/meeting_minutes` 始终为空，不携带历史提交、附件或已生成的 DOCX。两个便携包的 EXE、启动器、锁文件和运行目录彼此独立。
 
 ```text
 .env
@@ -78,6 +80,7 @@ Windows 便携交付先在开发机执行 `packaging/windows/build_portable.ps1`
 ```text
 .env.meeting-minutes + meeting_minutes_bot/config/people.yaml + 正式 DOCX 模板
   -> meeting_minutes_bot.settings.load_settings()
+       -> 源码运行取包上级目录；冻结运行取 MeetingMinutesBot.exe 所在目录
   -> 持有 logs/meeting_minutes/meeting_minutes_bot.lock（与销售锁独立）
   -> 初始化 data/meeting_minutes/meeting_minutes.db
   -> FeishuChannel 长连接（私聊开放、群聊禁用）
@@ -88,14 +91,20 @@ Windows 便携交付先在开发机执行 `packaging/windows/build_portable.ps1`
        -> 图片 / PDF / DOCX / Markdown
             -> data/meeting_minutes/attachments/（默认 14 天本地附件缓存）
             -> 图片 OCR / PDF 文字层 / DOCX / Markdown 提取
-            -> meeting_submissions 保存原文、识别文本和消息类型
+            -> DOCX 另存 data/meeting_minutes/submission_docs/<周期>/<message_id>.docx
+            -> meeting_submissions 保存原文、文字摘要；DOCX 路径写入 formatted_content
        -> 查看我的纪要 / 撤回本周提交
-       -> 管理员：查看本周提交状态 / 生成本周纪要
+       -> 管理员：查看本周提交状态 / 生成本周纪要 / 重载人员配置
+            -> 重载：重读人员 YAML + 校验模板占位符，通过后热替换共享 PeopleStore；失败保留原名单
             -> 按 Asia/Shanghai ISO 周查询有效提交
-            -> 按 template_key 渲染正式模板
+            -> 按 template_key 渲染正式模板；有源 DOCX 时把表格与内嵌图片原样注入对应人员段落
             -> data/meeting_minutes/output/<周期>_v<版本>_<时间戳>.docx
             -> meeting_documents 保存版本、状态和路径
        -> 回复文字或 DOCX
+  -> 周日提醒后台任务（可用 MEETING_BOT_REMINDER_ENABLED=false 关闭）
+       -> Asia/Shanghai 周日 17:00 / 20:00
+       -> 查询 enabled 且本周无有效提交的人员
+       -> channel.send(open_id) 私聊提醒；meeting_reminder_runs 幂等
   -> 启动时及每 24 小时清理超过保留期的附件、数据库记录和 DOCX
   -> logs/meeting_minutes/meeting_minutes_bot.log
 ```
@@ -135,6 +144,7 @@ Windows 便携交付先在开发机执行 `packaging/windows/build_portable.ps1`
 - 固定来源登记与 latest 缓存位于汇总目录的 `registered/`，不属于全局缓存清理范围；`清空云表` 清固定登记和对应 latest，`清空汇总` 只清临时批次。
 - Lark SDK 日志统一传播到根日志管线；Lark 与 `httpx` 的最低级别固定为 `WARNING`，格式化器继续兜底清理 `access_key`、`ticket`、`access_token` 和 `app_secret` 查询参数。
 - 纪要机器人使用 `group_policy="disabled"`，只接收私聊；其锁文件、日志目录、SQLite、DOCX 输出和 `MEETING_BOT_` 环境变量不得与销售机器人复用。
+- 单实例锁只保护同一目录；同一飞书应用在多台电脑或多个目录同时运行会争抢消息，交付便携包后必须停止开发机实例。
 
 ## 运行产物与安全
 

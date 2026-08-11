@@ -58,6 +58,8 @@ class ExtractedAttachment:
     raw_content: str
     parsed_content: str
     recognition_method: str
+    source_path: Path | None = None
+    has_embedded_media: bool = False
 
     @property
     def character_count(self) -> int:
@@ -65,8 +67,15 @@ class ExtractedAttachment:
 
     @property
     def preview(self) -> str:
-        text = self.parsed_content[:PREVIEW_LENGTH]
-        return text + ("……" if len(self.parsed_content) > PREVIEW_LENGTH else "")
+        if self.parsed_content:
+            text = self.parsed_content[:PREVIEW_LENGTH]
+            suffix = "……" if len(self.parsed_content) > PREVIEW_LENGTH else ""
+            if self.has_embedded_media:
+                return text + suffix + "（含表格/图片，生成纪要时原样嵌入）"
+            return text + suffix
+        if self.has_embedded_media:
+            return "（含表格/图片，无文字摘要；生成纪要时原样嵌入）"
+        return ""
 
 
 def _value(source: object, name: str) -> Any:
@@ -220,7 +229,26 @@ def _extract_markdown(path: Path) -> tuple[str, str]:
     return raw, parser.text()
 
 
-def _extract_docx(path: Path) -> str:
+def _docx_has_embedded_media(document: Document) -> bool:
+    """True when the DOCX body contains tables or inline/related images."""
+
+    if document.tables:
+        return True
+    if document.inline_shapes:
+        return True
+    for rel in document.part.rels.values():
+        reltype = str(getattr(rel, "reltype", "")).lower()
+        target = str(getattr(rel, "target_ref", "")).lower()
+        if "image" in reltype or target.endswith(
+            (".png", ".jpg", ".jpeg", ".gif", ".bmp", ".emf", ".wmf")
+        ):
+            return True
+    return False
+
+
+def _extract_docx(path: Path) -> tuple[str, bool]:
+    """Return (text_summary, has_embedded_media) for a Word attachment."""
+
     try:
         document = Document(path)
     except Exception as exc:
@@ -237,7 +265,8 @@ def _extract_docx(path: Path) -> str:
             text = _normalize_text(block.text)
             if text:
                 blocks.append(text)
-    return _normalize_text("\n".join(blocks))
+    summary = _normalize_text("\n".join(blocks))
+    return summary, _docx_has_embedded_media(document)
 
 
 def _extract_pdf(path: Path, max_pages: int) -> str:
@@ -321,6 +350,8 @@ class AttachmentProcessor:
 
         intended_type = validate_resource_type(resource)
         file_name = _safe_display_name(resource.file_name or resolved.name)
+        has_media = False
+        source_path: Path | None = None
         if intended_type == "image":
             async with self._ocr_lock:
                 parsed = await asyncio.to_thread(self._extract_image, resolved)
@@ -331,22 +362,28 @@ class AttachmentProcessor:
             raw = parsed
             method = "PDF 文字层提取"
         elif intended_type == "docx":
-            parsed = await asyncio.to_thread(_extract_docx, resolved)
+            parsed, has_media = await asyncio.to_thread(_extract_docx, resolved)
             raw = parsed
-            method = "Word 正文与表格提取"
+            method = "Word 正文/表格提取（图片原样保留）"
+            source_path = resolved
         else:
             raw, parsed = await asyncio.to_thread(_extract_markdown, resolved)
             method = "Markdown 文本解析"
 
         parsed = _normalize_text(parsed)
-        if not parsed:
+        if not parsed and not has_media:
             raise AttachmentProcessingError("附件中没有识别到有效文字。")
+        if not parsed and has_media:
+            parsed = "（Word 含表格或图片，无文字摘要）"
+            raw = parsed
         return ExtractedAttachment(
             file_name=file_name,
             message_type=intended_type,
             raw_content=raw,
             parsed_content=parsed,
             recognition_method=method,
+            source_path=source_path,
+            has_embedded_media=has_media,
         )
 
     def _extract_image(self, path: Path) -> str:

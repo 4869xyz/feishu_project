@@ -3,14 +3,24 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from datetime import datetime, timedelta
 from pathlib import Path
 
 from sqlalchemy import delete, func, select, update
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncEngine, async_sessionmaker, create_async_engine
 
-from .models import Base, MeetingDocument, MeetingEvent, MeetingSubmission, utc_now
+from .models import (
+    Base,
+    MeetingDocument,
+    MeetingEvent,
+    MeetingReminderRun,
+    MeetingSubmission,
+    utc_now,
+)
 from .people import Person
+
+REMINDER_PROCESSING_TIMEOUT = timedelta(minutes=10)
 
 
 @dataclass(frozen=True, slots=True)
@@ -20,14 +30,30 @@ class DocumentReservation:
 
 
 @dataclass(frozen=True, slots=True)
+class ReminderReservation:
+    id: int
+    reused: bool = False
+
+
+@dataclass(frozen=True, slots=True)
+class SubmissionContent:
+    """One active submission used when rendering the weekly DOCX."""
+
+    parsed_content: str
+    source_relative_path: str | None = None
+    message_type: str = "text"
+
+
+@dataclass(frozen=True, slots=True)
 class DatabaseCleanupResult:
     documents: int
     submissions: int
     events: int
+    reminders: int = 0
 
     @property
     def total(self) -> int:
-        return self.documents + self.submissions + self.events
+        return self.documents + self.submissions + self.events + self.reminders
 
 
 class MeetingRepository:
@@ -55,10 +81,14 @@ class MeetingRepository:
             events = await session.execute(
                 delete(MeetingEvent).where(MeetingEvent.created_at < cutoff)
             )
+            reminders = await session.execute(
+                delete(MeetingReminderRun).where(MeetingReminderRun.created_at < cutoff)
+            )
         return DatabaseCleanupResult(
             documents=int(documents.rowcount or 0),
             submissions=int(submissions.rowcount or 0),
             events=int(events.rowcount or 0),
+            reminders=int(reminders.rowcount or 0),
         )
 
     async def vacuum(self) -> None:
@@ -100,6 +130,7 @@ class MeetingRepository:
         parsed_content: str,
         message_type: str,
         mode: str,
+        formatted_content: str | None = None,
     ) -> None:
         async with self.sessions.begin() as session:
             if mode == "replace":
@@ -127,6 +158,7 @@ class MeetingRepository:
                     message_type=message_type,
                     raw_content=raw_content,
                     parsed_content=parsed_content,
+                    formatted_content=formatted_content,
                     submit_mode=mode,
                     processing_status="COMPLETED",
                     is_active=True,
@@ -152,25 +184,54 @@ class MeetingRepository:
 
     async def active_contents(self, *, period: str, open_id: str) -> tuple[str, ...]:
         async with self.sessions() as session:
-            rows = await session.scalars(
-                select(MeetingSubmission.parsed_content)
-                .where(
-                    MeetingSubmission.meeting_period == period,
-                    MeetingSubmission.sender_open_id == open_id,
-                    MeetingSubmission.is_active.is_(True),
-                    MeetingSubmission.processing_status == "COMPLETED",
+            rows = (
+                await session.execute(
+                    select(
+                        MeetingSubmission.parsed_content,
+                        MeetingSubmission.formatted_content,
+                        MeetingSubmission.message_type,
+                    )
+                    .where(
+                        MeetingSubmission.meeting_period == period,
+                        MeetingSubmission.sender_open_id == open_id,
+                        MeetingSubmission.is_active.is_(True),
+                        MeetingSubmission.processing_status == "COMPLETED",
+                    )
+                    .order_by(MeetingSubmission.created_at, MeetingSubmission.id)
                 )
-                .order_by(MeetingSubmission.created_at, MeetingSubmission.id)
-            )
-            return tuple(rows)
+            ).all()
+            labels: list[str] = []
+            for parsed, formatted, message_type in rows:
+                text = str(parsed or "").strip()
+                if formatted and message_type == "docx":
+                    if text:
+                        labels.append(f"{text}\n（含表格/图片，生成纪要时原样嵌入）")
+                    else:
+                        labels.append("（Word 含表格/图片，生成纪要时原样嵌入）")
+                else:
+                    labels.append(text)
+            return tuple(labels)
 
     async def contents_by_template_key(self, period: str) -> dict[str, tuple[str, ...]]:
+        """Compatibility helper returning plain-text summaries only."""
+
+        rich = await self.submissions_by_template_key(period)
+        return {
+            key: tuple(item.parsed_content for item in items)
+            for key, items in rich.items()
+        }
+
+    async def submissions_by_template_key(
+        self, period: str
+    ) -> dict[str, tuple[SubmissionContent, ...]]:
         async with self.sessions() as session:
             rows = (
                 await session.execute(
                     select(
                         MeetingSubmission.template_key,
                         MeetingSubmission.parsed_content,
+                        MeetingSubmission.formatted_content,
+                        MeetingSubmission.message_type,
                     )
                     .where(
                         MeetingSubmission.meeting_period == period,
@@ -180,9 +241,18 @@ class MeetingRepository:
                     .order_by(MeetingSubmission.created_at, MeetingSubmission.id)
                 )
             ).all()
-        grouped: dict[str, list[str]] = {}
-        for template_key, content in rows:
-            grouped.setdefault(template_key, []).append(content)
+        grouped: dict[str, list[SubmissionContent]] = {}
+        for template_key, parsed, formatted, message_type in rows:
+            path = str(formatted).strip() if formatted else None
+            if path == "":
+                path = None
+            grouped.setdefault(template_key, []).append(
+                SubmissionContent(
+                    parsed_content=str(parsed or ""),
+                    source_relative_path=path,
+                    message_type=str(message_type or "text"),
+                )
+            )
         return {key: tuple(values) for key, values in grouped.items()}
 
     async def submitted_open_ids(self, period: str) -> frozenset[str]:
@@ -256,3 +326,99 @@ class MeetingRepository:
                 .order_by(MeetingSubmission.id)
             )
             return tuple(rows)
+
+    async def claim_reminder_run(
+        self,
+        *,
+        period: str,
+        slot: str,
+        processing_timeout: timedelta = REMINDER_PROCESSING_TIMEOUT,
+        now: datetime | None = None,
+    ) -> ReminderReservation | None:
+        """Claim a reminder wave. Returns None when the wave already completed."""
+
+        current = now or utc_now()
+        async with self.sessions() as session:
+            existing = await session.scalar(
+                select(MeetingReminderRun).where(
+                    MeetingReminderRun.meeting_period == period,
+                    MeetingReminderRun.slot == slot,
+                )
+            )
+            if existing is None:
+                run = MeetingReminderRun(
+                    meeting_period=period,
+                    slot=slot,
+                    status="PROCESSING",
+                    created_at=current,
+                    updated_at=current,
+                )
+                session.add(run)
+                try:
+                    await session.commit()
+                except IntegrityError:
+                    await session.rollback()
+                    existing = await session.scalar(
+                        select(MeetingReminderRun).where(
+                            MeetingReminderRun.meeting_period == period,
+                            MeetingReminderRun.slot == slot,
+                        )
+                    )
+                    if existing is None:
+                        return None
+                else:
+                    return ReminderReservation(id=run.id)
+
+            if existing.status == "COMPLETED":
+                return None
+
+            stale_before = current - processing_timeout
+            updated_at = existing.updated_at or existing.created_at
+            if existing.status == "PROCESSING" and updated_at > stale_before:
+                return None
+
+            existing.status = "PROCESSING"
+            existing.attempted = 0
+            existing.sent = 0
+            existing.failed = 0
+            existing.error_message = None
+            existing.updated_at = current
+            existing.completed_at = None
+            await session.commit()
+            return ReminderReservation(id=existing.id, reused=True)
+
+    async def finish_reminder_run(
+        self,
+        run_id: int,
+        *,
+        status: str,
+        attempted: int = 0,
+        sent: int = 0,
+        failed: int = 0,
+        error: str | None = None,
+    ) -> None:
+        async with self.sessions.begin() as session:
+            await session.execute(
+                update(MeetingReminderRun)
+                .where(MeetingReminderRun.id == run_id)
+                .values(
+                    status=status,
+                    attempted=attempted,
+                    sent=sent,
+                    failed=failed,
+                    error_message=error,
+                    updated_at=utc_now(),
+                    completed_at=utc_now() if status == "COMPLETED" else None,
+                )
+            )
+
+    async def reminder_run(
+        self, *, period: str, slot: str
+    ) -> MeetingReminderRun | None:
+        async with self.sessions() as session:
+            return await session.scalar(
+                select(MeetingReminderRun).where(
+                    MeetingReminderRun.meeting_period == period,
+                    MeetingReminderRun.slot == slot,
+                )
+            )

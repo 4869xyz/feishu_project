@@ -69,3 +69,26 @@ class MeetingDocument(Base):
     updated_at: Mapped[datetime] = mapped_column(
         DateTime, default=utc_now, onupdate=utc_now
     )
+
+
+class MeetingReminderRun(Base):
+    """Tracks one Sunday reminder wave for a meeting period."""
+
+    __tablename__ = "meeting_reminder_runs"
+    __table_args__ = (
+        UniqueConstraint("meeting_period", "slot", name="uq_meeting_reminder_period_slot"),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    meeting_period: Mapped[str] = mapped_column(String(16), index=True, nullable=False)
+    slot: Mapped[str] = mapped_column(String(32), nullable=False)
+    status: Mapped[str] = mapped_column(String(32), nullable=False, default="PROCESSING")
+    attempted: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    sent: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    failed: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    error_message: Mapped[str | None] = mapped_column(Text, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=utc_now)
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime, default=utc_now, onupdate=utc_now
+    )
+    completed_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)

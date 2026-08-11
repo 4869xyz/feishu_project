@@ -50,6 +50,53 @@ class PeopleDirectory:
         )
 
 
+class PeopleStore:
+    """Mutable holder that lets consumers share one hot-swappable directory."""
+
+    def __init__(
+        self,
+        directory: PeopleDirectory,
+        *,
+        config_path: str | Path | None = None,
+    ) -> None:
+        self._directory = directory
+        self._config_path = Path(config_path) if config_path is not None else None
+
+    @classmethod
+    def from_path(cls, path: str | Path) -> "PeopleStore":
+        """Load the YAML once and keep the path for later reloads."""
+
+        return cls(load_people(path), config_path=path)
+
+    @property
+    def directory(self) -> PeopleDirectory:
+        return self._directory
+
+    @property
+    def config_path(self) -> Path | None:
+        return self._config_path
+
+    def load_candidate(self) -> PeopleDirectory:
+        """Re-read the YAML without touching the currently active directory."""
+
+        if self._config_path is None:
+            raise PeopleConfigurationError("人员配置路径未设置，无法重载")
+        return load_people(self._config_path)
+
+    def replace(self, directory: PeopleDirectory) -> None:
+        """Atomically switch every consumer to the validated new directory."""
+
+        self._directory = directory
+
+
+def ensure_store(people: "PeopleDirectory | PeopleStore") -> PeopleStore:
+    """Wrap a bare directory so consumers can uniformly read via a store."""
+
+    if isinstance(people, PeopleStore):
+        return people
+    return PeopleStore(people)
+
+
 def _required_text(source: dict[str, Any], name: str, open_id: str) -> str:
     value = str(source.get(name, "")).strip()
     if not value:

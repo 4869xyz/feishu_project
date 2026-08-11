@@ -8,8 +8,15 @@ from datetime import datetime
 from pathlib import Path
 
 from .attachments import ExtractedAttachment
-from .document import MinutesDocumentRenderer
-from .people import PeopleDirectory, Person
+from .document import MinutesDocumentRenderer, MinutesTemplateError
+from .docx_merge import persist_submission_docx
+from .people import (
+    PeopleConfigurationError,
+    PeopleDirectory,
+    PeopleStore,
+    Person,
+    ensure_store,
+)
 from .period import local_datetime, meeting_period, period_label
 from .repository import MeetingRepository
 
@@ -18,7 +25,8 @@ VIEW_COMMAND = "查看我的纪要"
 WITHDRAW_COMMAND = "撤回本周提交"
 GENERATE_COMMAND = "生成本周纪要"
 STATUS_COMMAND = "查看本周提交状态"
-ADMIN_COMMANDS = frozenset({GENERATE_COMMAND, STATUS_COMMAND})
+RELOAD_COMMAND = "重载人员配置"
+ADMIN_COMMANDS = frozenset({GENERATE_COMMAND, STATUS_COMMAND, RELOAD_COMMAND})
 
 
 @dataclass(frozen=True, slots=True)
@@ -33,17 +41,27 @@ class MeetingMinutesService:
         self,
         *,
         repository: MeetingRepository,
-        people: PeopleDirectory,
+        people: PeopleDirectory | PeopleStore,
         renderer: MinutesDocumentRenderer,
         timezone: str = "Asia/Shanghai",
         max_text_length: int = 20_000,
+        data_dir: str | Path | None = None,
     ) -> None:
         self.repository = repository
-        self.people = people
+        self._people_store = ensure_store(people)
         self.renderer = renderer
         self.timezone = timezone
         self.max_text_length = max_text_length
+        self.data_dir = (
+            Path(data_dir).resolve()
+            if data_dir is not None
+            else Path(renderer.data_dir).resolve()
+        )
         self._generation_lock = asyncio.Lock()
+
+    @property
+    def people(self) -> PeopleDirectory:
+        return self._people_store.directory
 
     def _person_or_reply(self, open_id: str) -> tuple[Person | None, ServiceResult | None]:
         person = self.people.find(open_id)
@@ -78,6 +96,8 @@ class MeetingMinutesService:
                 return ServiceResult(f"你没有执行“{cleaned}”的权限。")
             if cleaned == STATUS_COMMAND:
                 return await self._status(period)
+            if cleaned == RELOAD_COMMAND:
+                return await self._reload_people()
             return await self._generate(message_id, period, now)
 
         person, rejection = self._person_or_reply(sender_open_id)
@@ -120,6 +140,20 @@ class MeetingMinutesService:
         if rejection is not None or person is None:
             return rejection or ServiceResult("人员身份校验失败。")
 
+        formatted_content: str | None = None
+        if (
+            attachment.message_type == "docx"
+            and attachment.source_path is not None
+            and attachment.source_path.is_file()
+        ):
+            formatted_content = await asyncio.to_thread(
+                persist_submission_docx,
+                source=attachment.source_path,
+                data_dir=self.data_dir,
+                period=period,
+                message_id=message_id,
+            )
+
         result = await self._submit_content(
             message_id=message_id,
             person=person,
@@ -128,6 +162,8 @@ class MeetingMinutesService:
             parsed_content=attachment.parsed_content,
             message_type=attachment.message_type,
             mode="append",
+            formatted_content=formatted_content,
+            allow_empty_text=attachment.has_embedded_media,
         )
         if result.duplicate or not result.text.startswith("已收到"):
             return result
@@ -153,8 +189,10 @@ class MeetingMinutesService:
         parsed_content: str,
         message_type: str,
         mode: str,
+        formatted_content: str | None = None,
+        allow_empty_text: bool = False,
     ) -> ServiceResult:
-        if not parsed_content:
+        if not parsed_content and not allow_empty_text:
             return ServiceResult("纪要内容不能为空。")
         if len(parsed_content) > self.max_text_length:
             return ServiceResult(
@@ -173,6 +211,7 @@ class MeetingMinutesService:
                 parsed_content=parsed_content,
                 message_type=message_type,
                 mode=mode,
+                formatted_content=formatted_content,
             )
         except Exception as exc:
             await self.repository.finish_event(message_id, status="FAILED", error=str(exc))
@@ -233,6 +272,24 @@ class MeetingMinutesService:
             f"未提交：{len(missing)} 人（{missing_text}）"
         )
 
+    async def _reload_people(self) -> ServiceResult:
+        """Re-read people.yaml, validate the template, then hot-swap the store."""
+
+        try:
+            candidate = await asyncio.to_thread(self._people_store.load_candidate)
+            await asyncio.to_thread(self.renderer.validate_template, candidate)
+        except (PeopleConfigurationError, MinutesTemplateError) as exc:
+            return ServiceResult(f"人员配置重载失败，仍使用原配置：{exc}")
+        self._people_store.replace(candidate)
+        enabled = candidate.enabled_people
+        return ServiceResult(
+            "人员配置已重载。\n"
+            f"总人数：{len(candidate.people)}\n"
+            f"启用人数：{len(enabled)}\n"
+            f"管理员数：{len(candidate.admins)}\n"
+            f"启用人员：{'、'.join(person.name for person in enabled) or '无'}"
+        )
+
     async def _generate(
         self, message_id: str, period: str, generated_at: datetime
     ) -> ServiceResult:
@@ -253,7 +310,7 @@ class MeetingMinutesService:
                 reservation = await self.repository.reserve_document(
                     message_id=message_id, period=period
                 )
-                contents = await self.repository.contents_by_template_key(period)
+                contents = await self.repository.submissions_by_template_key(period)
                 output_path = await asyncio.to_thread(
                     self.renderer.render,
                     period=period,

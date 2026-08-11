@@ -6,6 +6,10 @@
 
 | 日期 | 计划 | 状态 | 验收摘要 |
 | --- | --- | --- | --- |
+| 2026-08-11 | [DOCX 表格与图片原样嵌入](2026-08-11_docx-rich-embed_plan.md) | 已完成 | 源 Word 持久化并注入周报；纪要测试 61 通过 1 跳过。 |
+| 2026-08-08 | [纪要机器人便携发布包](2026-08-08_meeting-minutes-portable-release_plan.md) | 已完成 | 免安装 Windows x64 交付，随包 OCR 模型与当前配置，数据全新；160 项测试通过。 |
+| 2026-08-08 | [人员 YAML 热重载](2026-08-08_people-yaml-hot-reload_plan.md) | 已完成 | 管理员命令重载 people.yaml，校验通过热替换，失败保留原名单；纪要测试 55 通过 1 跳过。 |
+| 2026-08-08 | [周日未提交提醒](2026-08-08_meeting-minutes-sunday-reminder_plan.md) | 已完成 | 周日 17:00/20:00 私聊缺交人员，SQLite 幂等；纪要测试 50 通过 1 跳过。 |
 | 2026-07-20 | [固定云表链接批量登记](2026-07-20_registered-cloud-source-batch-add_plan.md) | 已完成 | 多链接按序去重，部分失败继续并统一回复；101 项测试通过。 |
 | 2026-07-20 | [Windows 单人免安装便携交付](2026-07-20_windows-portable-release_plan.md) | 已完成 | 免 Python、一键后台启停、当前配置原样带入；2026-07-21 最新包 103 项测试与冻结 EXE 验证通过。 |
 | 2026-07-20 | [I:T 金额列自适应宽度](2026-07-20_signing-amount-column-autofit_plan.md) | 已完成 | 各月份独立扩展并保留模板下限，`bestFit` 持久化；97 项测试通过。 |

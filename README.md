@@ -5,7 +5,7 @@
 | 机器人 | 入口 | 主要能力 | 详细文档 |
 | --- | --- | --- | --- |
 | 销售汇总机器人 | `python feishu_bot_listener.py` | 接收 Excel 或 Sheets/Wiki 链接，按既定 SOP 生成签约汇总 Excel。 | 本 README |
-| 周例会纪要机器人 | `python -m meeting_minutes_bot` | 接收私聊文字、图片、文字型 PDF、DOCX 和 Markdown，保存可追溯提交并由管理员生成版本化 DOCX。 | [周例会纪要机器人说明](docs/meeting_minutes/README.md) |
+| 周例会纪要机器人 | `python -m meeting_minutes_bot` | 接收私聊文字、图片、文字型 PDF、DOCX 和 Markdown，保存可追溯提交，周日提醒未提交人员，并由管理员生成版本化 DOCX。 | [周例会纪要机器人说明](docs/meeting_minutes/README.md) |
 
 两者使用不同的飞书应用、配置文件、数据目录、日志和进程锁，可以同时运行；新增纪要功能不会改变原销售机器人的行为。
 
@@ -42,7 +42,8 @@
 ├── data/meeting_minutes/     # 纪要数据库、附件缓存和 DOCX 输出（Git 忽略）
 ├── logs/                     # 本地日志（Git 忽略）
 ├── tests/                    # 不访问真实飞书的 pytest 测试
-├── packaging/windows/        # Windows 便携包构建与一键启动脚本
+├── packaging/windows/        # 销售机器人便携包构建与一键启动脚本
+├── packaging/windows/meeting/ # 纪要机器人便携包构建与一键启动脚本
 ├── release/                  # 本地发布产物（Git 忽略，包含当前 .env）
 ├── docs/plans/               # 功能计划和执行记录
 ├── docs/meeting_minutes/     # 周例会纪要机器人使用说明
@@ -72,13 +73,19 @@ copy meeting_minutes_bot\config\people.example.yaml meeting_minutes_bot\config\p
 
 ### Windows 免安装便携包
 
-单人交付时可生成无需安装 Python 的 Windows 便携包。构建脚本会原样复制当前 `.env`，并在项目的 `release/` 目录生成可直接解压使用的 ZIP：
+两个机器人各有独立的便携包，目标电脑都无需安装 Python，构建产物统一放在 `release/`：
 
 ```powershell
+# 销售汇总机器人
 powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\packaging\windows\build_portable.ps1
+
+# 周例会纪要机器人
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\packaging\windows\meeting\build_meeting_portable.ps1
 ```
 
-目标用户只需双击“启动机器人.cmd”，之后继续在飞书中使用。详细构建、交付和更新方式见 [`docs/WINDOWS_PORTABLE_DEPLOYMENT.md`](docs/WINDOWS_PORTABLE_DEPLOYMENT.md)。
+目标用户只需双击“启动机器人.cmd”，之后继续在飞书中使用。销售包见 [`docs/WINDOWS_PORTABLE_DEPLOYMENT.md`](docs/WINDOWS_PORTABLE_DEPLOYMENT.md)，纪要包见[便携发布包构建与交付](docs/meeting_minutes/便携发布包构建与交付.md)。
+
+两个发布包都会原样复制当前 `.env`，含 App Secret，必须点对点交付。纪要包沿用同一个飞书应用，交付后必须停止开发机上的纪要机器人，否则两个长连接会争抢同一条消息。
 
 ## 配置
 
@@ -231,7 +238,7 @@ wiki:wiki:readonly
 ## 工程协作与文档入口
 
 - [架构地图](ARCHITECTURE.md)：模块边界、依赖方向和两条数据流。
-- [周例会纪要机器人说明](docs/meeting_minutes/README.md)：纪要机器人的配置、命令、附件限制和数据保留规则。
+- [周例会纪要机器人说明](docs/meeting_minutes/README.md)：纪要机器人的配置、命令、周日提醒、附件限制和数据保留规则。
 - [功能计划模板](docs/templates/feature-plan-template.md)：新增功能先写范围、决策、原子 Checklist 和验收。
 - [功能计划目录说明](docs/plans/README.md)：计划的命名、状态和归档规则。
 - [本次表格链接导出计划](docs/plans/2026-07-14_feishu-table-link-export_plan.md)：已完成的实现记录与验收证据。

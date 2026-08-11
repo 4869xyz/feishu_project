@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import os
+import sys
 from collections.abc import Mapping
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -10,7 +11,15 @@ from pathlib import Path
 from dotenv import dotenv_values
 
 
-PROJECT_ROOT = Path(__file__).resolve().parents[1]
+def _runtime_project_root() -> Path:
+    """Return the source root or the directory containing a frozen executable."""
+
+    if getattr(sys, "frozen", False):
+        return Path(sys.executable).resolve().parent
+    return Path(__file__).resolve().parents[1]
+
+
+PROJECT_ROOT = _runtime_project_root()
 DEFAULT_ENV_FILE = PROJECT_ROOT / ".env.meeting-minutes"
 VALID_LOG_LEVELS = {"CRITICAL", "ERROR", "WARNING", "INFO", "DEBUG"}
 DEFAULT_MAX_ATTACHMENT_BYTES = 20 * 1024 * 1024
@@ -43,6 +52,7 @@ class MeetingBotSettings:
     retention_days: int = DEFAULT_RETENTION_DAYS
     attachment_cache_ttl_seconds: int = DEFAULT_ATTACHMENT_CACHE_TTL_SECONDS
     attachment_cache_max_bytes: int = DEFAULT_ATTACHMENT_CACHE_MAX_BYTES
+    reminder_enabled: bool = True
 
 
 def _project_path(value: str, root: Path) -> Path:
@@ -181,10 +191,21 @@ def load_settings(
 
     attachment_dir = data_dir / "attachments"
 
+    reminder_raw = values.get("MEETING_BOT_REMINDER_ENABLED", "true").strip().lower()
+    if reminder_raw in {"1", "true", "yes", "on"}:
+        reminder_enabled = True
+    elif reminder_raw in {"0", "false", "no", "off"}:
+        reminder_enabled = False
+    else:
+        raise MeetingBotConfigurationError(
+            "MEETING_BOT_REMINDER_ENABLED 必须是 true 或 false"
+        )
+
     try:
         data_dir.mkdir(parents=True, exist_ok=True)
         output_dir.mkdir(parents=True, exist_ok=True)
         attachment_dir.mkdir(parents=True, exist_ok=True)
+        (data_dir / "submission_docs").mkdir(parents=True, exist_ok=True)
         log_dir.mkdir(parents=True, exist_ok=True)
     except OSError as exc:
         raise MeetingBotConfigurationError(f"无法创建纪要机器人运行目录：{exc}") from exc
@@ -209,4 +230,5 @@ def load_settings(
         retention_days=retention_days,
         attachment_cache_ttl_seconds=attachment_cache_ttl_seconds,
         attachment_cache_max_bytes=attachment_cache_max_bytes,
+        reminder_enabled=reminder_enabled,
     )
