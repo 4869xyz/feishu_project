@@ -168,3 +168,9 @@
 - 随包提供 `启动机器人.sh` / `停止机器人.sh` / `查看运行日志.sh` 与 `meeting-minutes-bot.service.example`（systemd 开机自启与崩溃拉起）。
 - **必须在 Linux 上构建**，不能从 Windows 交叉编译；构建与交付说明见 `docs/meeting_minutes/Linux便携发布包构建与交付.md`。
 - 与 Windows 便携包同样复制当前 `.env.meeting-minutes`、人员 YAML 与模板，数据目录为空；同一飞书应用仍只能单实例运行。
+
+### Ubuntu 源码 systemd 部署与升级 SOP
+
+- 新增 `meeting-minutes-bot.source.service.example`（`python -m meeting_minutes_bot` + venv），与便携包 unit 均配置 `Restart=always` 以及 **60 秒内最多自动重启 5 次**，超限停止并等待管理员 `reset-failed` 后处理。
+- 新增 `docs/meeting_minutes/Ubuntu源码systemd部署与升级.md`：首次部署、变更分类（热更新 vs 重启）、标准 `git pull` 升级/回滚与限流恢复步骤。
+- 管理员说明改为推荐固定服务器走源码 + systemd；便携包仍作免 Python 交付备选。

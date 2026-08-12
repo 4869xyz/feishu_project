@@ -31,7 +31,7 @@ Windows 便携交付先在开发机执行 `packaging/windows/build_portable.ps1`
 
 纪要机器人有独立的便携交付：`packaging/windows/meeting/build_meeting_portable.ps1` 以 `run_meeting_minutes_bot.py` 为入口冻结出 `MeetingMinutesBot.exe`，随包收集 RapidOCR 的 ONNX 模型、onnxruntime 与 PyMuPDF 原生库和 `tzdata`，并外置复制当前 `.env.meeting-minutes`、人员 YAML 与正式模板。发布包的 `data/meeting_minutes` 与 `logs/meeting_minutes` 始终为空，不携带历史提交、附件或已生成的 DOCX。两个便携包的 EXE、启动器、锁文件和运行目录彼此独立。
 
-Linux（Ubuntu 24.04 x64）纪要便携包由 `packaging/linux/meeting/build_meeting_portable.sh` 在 **Linux 构建机** 上生成 `MeetingMinutesBot` onedir 与 `周例会纪要机器人-Linux-x64.tar.gz`，布局与 Windows 包对齐并附 systemd 示例；不能在 Windows 上交叉编译。
+Linux（Ubuntu 24.04 x64）纪要便携包由 `packaging/linux/meeting/build_meeting_portable.sh` 在 **Linux 构建机** 上生成 `MeetingMinutesBot` onedir 与 `周例会纪要机器人-Linux-x64.tar.gz`，布局与 Windows 包对齐并附 systemd 示例；不能在 Windows 上交叉编译。固定服务器也可用源码 + `.venv` + `meeting-minutes-bot.source.service.example`（`Restart=always`，60 秒内最多自动启动 5 次）长期运行，升级 SOP 见 `docs/meeting_minutes/Ubuntu源码systemd部署与升级.md`。
 
 ```text
 .env

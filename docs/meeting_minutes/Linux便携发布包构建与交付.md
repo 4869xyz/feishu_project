@@ -73,7 +73,7 @@ release/周例会纪要机器人-Linux-x64.tar.gz
 
 ### 推荐：systemd
 
-编辑包内 `meeting-minutes-bot.service.example`，把 `WorkingDirectory` / `ExecStart` 改成实际「程序」绝对路径，然后：
+编辑包内 `meeting-minutes-bot.service.example`，把 `WorkingDirectory` / `ExecStart` 改成实际「程序」绝对路径。单元已配置 `Restart=always`，以及 **60 秒内最多启动 5 次**（`StartLimitIntervalSec=60` / `StartLimitBurst=5`）；超限后需管理员 `systemctl reset-failed` 再 `start`。
 
 ```bash
 sudo cp meeting-minutes-bot.service.example /etc/systemd/system/meeting-minutes-bot.service
@@ -82,7 +82,7 @@ sudo systemctl enable --now meeting-minutes-bot
 sudo systemctl status meeting-minutes-bot
 ```
 
-使用 systemd 后不要再跑 `./启动机器人.sh`。
+使用 systemd 后不要再跑 `./启动机器人.sh`。固定服务器若用源码 + venv，改看 [Ubuntu 源码 systemd 部署与升级](Ubuntu源码systemd部署与升级.md)。
 
 ## 更新
 

@@ -18,7 +18,9 @@ python -m pip install -r requirements.txt
 
 原销售机器人仍通过 `python feishu_bot_listener.py` 启动。两个命令使用不同飞书凭据、日志、锁文件和数据目录，可以同时运行。
 
-需要把机器人交给没有 Python 环境的同事时，见[便携发布包构建与交付](便携发布包构建与交付.md)。
+需要把机器人交给没有 Python 环境的同事时，见[便携发布包构建与交付](便携发布包构建与交付.md)（Windows）或 [Linux 便携发布包构建与交付](Linux便携发布包构建与交付.md)。
+
+固定 Ubuntu 服务器长期运行（源码 + venv + systemd，含升级与 60 秒/5 次启动限流）见 [Ubuntu 源码 systemd 部署与升级](Ubuntu源码systemd部署与升级.md)。管理员运维摘要见[管理员使用说明](管理员使用说明.md)。
 
 `.env.meeting-minutes` 和 `meeting_minutes_bot/config/people.yaml` 均含敏感信息，已由 Git 忽略；只提交不含真实凭据和 `open_id` 的示例文件。
 
