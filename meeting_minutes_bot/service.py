@@ -8,6 +8,13 @@ from datetime import datetime
 from pathlib import Path
 
 from .attachments import ExtractedAttachment
+from .config_update import (
+    ConfigUpdateError,
+    apply_people_yaml,
+    apply_template_docx,
+    classify_admin_config_upload,
+    describe_config_health,
+)
 from .document import MinutesDocumentRenderer, MinutesTemplateError
 from .docx_merge import persist_submission_docx
 from .people import (
@@ -26,7 +33,10 @@ WITHDRAW_COMMAND = "撤回本周提交"
 GENERATE_COMMAND = "生成本周纪要"
 STATUS_COMMAND = "查看本周提交状态"
 RELOAD_COMMAND = "重载人员配置"
-ADMIN_COMMANDS = frozenset({GENERATE_COMMAND, STATUS_COMMAND, RELOAD_COMMAND})
+VALIDATE_COMMAND = "校验配置"
+ADMIN_COMMANDS = frozenset(
+    {GENERATE_COMMAND, STATUS_COMMAND, RELOAD_COMMAND, VALIDATE_COMMAND}
+)
 
 
 @dataclass(frozen=True, slots=True)
@@ -58,6 +68,7 @@ class MeetingMinutesService:
             else Path(renderer.data_dir).resolve()
         )
         self._generation_lock = asyncio.Lock()
+        self._config_lock = asyncio.Lock()
 
     @property
     def people(self) -> PeopleDirectory:
@@ -79,6 +90,15 @@ class MeetingMinutesService:
         _, rejection = self._person_or_reply(open_id)
         return rejection
 
+    def classify_config_upload(self, open_id: str, file_name: str) -> str | None:
+        """Classify an inbound file as people/template config for admins."""
+
+        return classify_admin_config_upload(
+            file_name=file_name,
+            template_path=self.renderer.template_path,
+            is_admin=self.people.is_admin(open_id),
+        )
+
     async def handle_text(
         self,
         *,
@@ -98,6 +118,8 @@ class MeetingMinutesService:
                 return await self._status(period)
             if cleaned == RELOAD_COMMAND:
                 return await self._reload_people()
+            if cleaned == VALIDATE_COMMAND:
+                return await self._validate_config()
             return await self._generate(message_id, period, now)
 
         person, rejection = self._person_or_reply(sender_open_id)
@@ -126,6 +148,54 @@ class MeetingMinutesService:
             mode=mode,
         )
 
+    async def handle_config_upload(
+        self,
+        *,
+        sender_open_id: str,
+        file_name: str,
+        source_path: Path,
+        kind: str | None = None,
+    ) -> ServiceResult:
+        """Apply an admin-uploaded people YAML or Word template."""
+
+        if not self.people.is_admin(sender_open_id):
+            return ServiceResult("你没有上传配置文件的权限。")
+        resolved_kind = kind or self.classify_config_upload(sender_open_id, file_name)
+        if resolved_kind is None:
+            return ServiceResult(
+                "未识别为配置更新。人员请上传 .yaml/.yml；"
+                f"模板请使用与正式模板同名的文件（当前：{self.renderer.template_path.name}）。"
+            )
+        if not source_path.is_file():
+            return ServiceResult("配置文件下载失败，请重新上传。")
+
+        async with self._config_lock:
+            try:
+                if resolved_kind == "people":
+                    result = await asyncio.to_thread(
+                        apply_people_yaml,
+                        uploaded_path=source_path,
+                        people_store=self._people_store,
+                        renderer=self.renderer,
+                        data_dir=self.data_dir,
+                        sender_open_id=sender_open_id,
+                    )
+                else:
+                    result = await asyncio.to_thread(
+                        apply_template_docx,
+                        uploaded_path=source_path,
+                        renderer=self.renderer,
+                        data_dir=self.data_dir,
+                    )
+            except (
+                ConfigUpdateError,
+                PeopleConfigurationError,
+                MinutesTemplateError,
+                OSError,
+            ) as exc:
+                return ServiceResult(f"配置更新失败，仍使用原配置：{exc}")
+        return ServiceResult(result.summary)
+
     async def handle_attachment(
         self,
         *,
@@ -136,6 +206,20 @@ class MeetingMinutesService:
     ) -> ServiceResult:
         now = local_datetime(received_at, self.timezone)
         period = meeting_period(now, self.timezone)
+
+        config_kind = None
+        if attachment.source_path is not None:
+            config_kind = self.classify_config_upload(
+                sender_open_id, attachment.file_name
+            )
+        if config_kind is not None and attachment.source_path is not None:
+            return await self.handle_config_upload(
+                sender_open_id=sender_open_id,
+                file_name=attachment.file_name,
+                source_path=attachment.source_path,
+                kind=config_kind,
+            )
+
         person, rejection = self._person_or_reply(sender_open_id)
         if rejection is not None or person is None:
             return rejection or ServiceResult("人员身份校验失败。")
@@ -275,12 +359,13 @@ class MeetingMinutesService:
     async def _reload_people(self) -> ServiceResult:
         """Re-read people.yaml, validate the template, then hot-swap the store."""
 
-        try:
-            candidate = await asyncio.to_thread(self._people_store.load_candidate)
-            await asyncio.to_thread(self.renderer.validate_template, candidate)
-        except (PeopleConfigurationError, MinutesTemplateError) as exc:
-            return ServiceResult(f"人员配置重载失败，仍使用原配置：{exc}")
-        self._people_store.replace(candidate)
+        async with self._config_lock:
+            try:
+                candidate = await asyncio.to_thread(self._people_store.load_candidate)
+                await asyncio.to_thread(self.renderer.validate_template, candidate)
+            except (PeopleConfigurationError, MinutesTemplateError) as exc:
+                return ServiceResult(f"人员配置重载失败，仍使用原配置：{exc}")
+            self._people_store.replace(candidate)
         enabled = candidate.enabled_people
         return ServiceResult(
             "人员配置已重载。\n"
@@ -289,6 +374,14 @@ class MeetingMinutesService:
             f"管理员数：{len(candidate.admins)}\n"
             f"启用人员：{'、'.join(person.name for person in enabled) or '无'}"
         )
+
+    async def _validate_config(self) -> ServiceResult:
+        text = await asyncio.to_thread(
+            describe_config_health,
+            people_store=self._people_store,
+            renderer=self.renderer,
+        )
+        return ServiceResult(text)
 
     async def _generate(
         self, message_id: str, period: str, generated_at: datetime

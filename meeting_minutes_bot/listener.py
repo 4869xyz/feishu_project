@@ -15,6 +15,8 @@ from lark_channel import (
     PolicyConfig,
 )
 
+from pathlib import Path
+
 from .attachments import (
     AttachmentProcessingError,
     AttachmentProcessor,
@@ -173,22 +175,31 @@ async def handle_message(
         await _reply_file(channel, message, result)
         return
 
-    rejection = service.submission_rejection(sender_open_id)
-    if rejection is not None:
-        await _reply(channel, message, rejection.text)
-        return
-    if attachment_processor is None:
-        await _reply(channel, message, "附件识别功能尚未初始化，请联系管理员。")
-        return
-
     try:
         resource = message_attachment_resource(message)
         if resource is None:
+            if attachment_processor is None:
+                await _reply(channel, message, "附件识别功能尚未初始化，请联系管理员。")
+                return
             raise AttachmentProcessingError(
                 "无法读取该消息中的附件资源，请重新发送图片或受支持的文件。"
             )
-        validate_resource_type(resource)
-        await _reply(channel, message, "已收到附件，正在本地识别，请稍候……")
+        file_name = resource.file_name or ""
+        config_kind = service.classify_config_upload(sender_open_id, file_name)
+        is_admin_config = config_kind is not None
+        if not is_admin_config:
+            rejection = service.submission_rejection(sender_open_id)
+            if rejection is not None:
+                await _reply(channel, message, rejection.text)
+                return
+            if attachment_processor is None:
+                await _reply(channel, message, "附件识别功能尚未初始化，请联系管理员。")
+                return
+        validate_resource_type(resource, allow_admin_config=is_admin_config)
+        if is_admin_config:
+            await _reply(channel, message, "已收到配置文件，正在校验并热更新，请稍候……")
+        else:
+            await _reply(channel, message, "已收到附件，正在本地识别，请稍候……")
         cached = await channel.resolve_resource_to_cache(
             message_id=str(message.message_id), resource=resource
         )
@@ -197,12 +208,22 @@ async def handle_message(
         ):
             reason = getattr(cached, "reason", None) or "附件下载失败"
             raise AttachmentProcessingError(str(reason))
-        attachment = await attachment_processor.extract(cached.path, resource)
-        result = await service.handle_attachment(
-            message_id=str(message.message_id),
-            sender_open_id=sender_open_id,
-            attachment=attachment,
-        )
+        cached_path = Path(cached.path)
+        if is_admin_config:
+            result = await service.handle_config_upload(
+                sender_open_id=sender_open_id,
+                file_name=file_name,
+                source_path=cached_path,
+                kind=config_kind,
+            )
+        else:
+            assert attachment_processor is not None
+            attachment = await attachment_processor.extract(cached_path, resource)
+            result = await service.handle_attachment(
+                message_id=str(message.message_id),
+                sender_open_id=sender_open_id,
+                attachment=attachment,
+            )
     except AttachmentProcessingError as exc:
         await _reply(channel, message, f"附件识别失败：{exc}")
         return

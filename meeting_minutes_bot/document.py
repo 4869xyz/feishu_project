@@ -60,15 +60,23 @@ class MinutesDocumentRenderer:
         return self._people_store.directory
 
     def validate_template(
-        self, directory: PeopleDirectory | None = None
+        self,
+        directory: PeopleDirectory | None = None,
+        *,
+        template_path: str | Path | None = None,
     ) -> frozenset[str]:
         """Validate placeholders against ``directory`` (default: active people)."""
 
         people = directory if directory is not None else self.people
-        if not self.template_path.is_file():
-            raise MinutesTemplateError(f"Word 模板不存在：{self.template_path}")
+        path = (
+            Path(template_path).resolve()
+            if template_path is not None
+            else self.template_path
+        )
+        if not path.is_file():
+            raise MinutesTemplateError(f"Word 模板不存在：{path}")
         try:
-            document = DocxTemplate(self.template_path)
+            document = DocxTemplate(path)
             variables = frozenset(document.get_undeclared_template_variables())
         except Exception as exc:
             raise MinutesTemplateError(f"Word 模板无法打开：{exc}") from exc

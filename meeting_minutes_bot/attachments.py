@@ -18,6 +18,7 @@ IMAGE_SUFFIXES = frozenset(
     {".png", ".jpg", ".jpeg", ".webp", ".bmp", ".tif", ".tiff"}
 )
 DOCUMENT_SUFFIXES = frozenset({".pdf", ".docx", ".md", ".markdown"})
+ADMIN_CONFIG_SUFFIXES = frozenset({".yaml", ".yml"})
 SUPPORTED_FILE_SUFFIXES = IMAGE_SUFFIXES | DOCUMENT_SUFFIXES
 IMAGE_FORMATS = frozenset({"PNG", "JPEG", "WEBP", "BMP", "TIFF"})
 MESSAGE_TYPES = {
@@ -25,6 +26,8 @@ MESSAGE_TYPES = {
     ".docx": "docx",
     ".md": "markdown",
     ".markdown": "markdown",
+    ".yaml": "yaml",
+    ".yml": "yaml",
 }
 MAX_IMAGE_PIXELS = 40_000_000
 PREVIEW_LENGTH = 200
@@ -126,7 +129,11 @@ def message_attachment_resource(message: object) -> AttachmentResource | None:
     return found[0] if found else None
 
 
-def validate_resource_type(resource: AttachmentResource) -> str:
+def validate_resource_type(
+    resource: AttachmentResource,
+    *,
+    allow_admin_config: bool = False,
+) -> str:
     """Validate metadata before downloading and return the intended content type."""
 
     if resource.type == "image":
@@ -136,9 +143,18 @@ def validate_resource_type(resource: AttachmentResource) -> str:
     suffix = Path(resource.file_name).suffix.lower()
     if suffix in IMAGE_SUFFIXES:
         return "image"
+    if suffix in ADMIN_CONFIG_SUFFIXES:
+        if not allow_admin_config:
+            allowed = "、".join(sorted(SUPPORTED_FILE_SUFFIXES))
+            raise AttachmentProcessingError(f"不支持该附件格式，仅支持：{allowed}")
+        return "yaml"
     message_type = MESSAGE_TYPES.get(suffix)
     if message_type is None:
         allowed = "、".join(sorted(SUPPORTED_FILE_SUFFIXES))
+        if allow_admin_config:
+            allowed = "、".join(
+                sorted(SUPPORTED_FILE_SUFFIXES | ADMIN_CONFIG_SUFFIXES)
+            )
         raise AttachmentProcessingError(f"不支持该附件格式，仅支持：{allowed}")
     return message_type
 

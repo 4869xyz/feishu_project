@@ -18,6 +18,7 @@
 | `feishu_bot_listener.py` | 配置消息准入、日志和单实例锁，创建长连接、串行编排并把结果或文件转换为飞书回复。 | `config`、`clients`、`services`、`lark-channel-sdk` |
 | `meeting_minutes_bot` | 独立读取 `.env.meeting-minutes` 和人员 YAML，处理私聊文字及附件、本地 OCR、幂等入库、权限命令、周日未提交提醒与版本化 DOCX 生成。 | `lark-channel-sdk`、SQLAlchemy、aiosqlite、PyYAML、docxtpl、PyMuPDF、RapidOCR、ONNX Runtime |
 | `packaging/windows` | 使用 PyInstaller 生成免 Python 的 Windows x64 便携程序，并提供中文启动、停止和日志入口。根目录面向销售机器人，`meeting/` 子目录面向纪要机器人，两套 spec、启动器和发布包相互独立。 | 项目入口、当前 `.env` 与 `.env.meeting-minutes`、汇总模板、纪要模板与人员 YAML、PowerShell |
+| `packaging/linux/meeting` | 在 Ubuntu 等 Linux x64 上用 PyInstaller 生成纪要机器人便携目录包（tar.gz），提供启停 shell 与 systemd 示例；不能在 Windows 上交叉编译。 | `run_meeting_minutes_bot.py`、当前 `.env.meeting-minutes`、人员 YAML 与正式模板、bash |
 | `tests` | 使用 fake/mock 验证配置、API 参数、解析、归档和回复。 | 被测模块、`pytest` |
 
 依赖必须单向：`config` 不依赖 `clients`/`services`；`clients` 和 `services` 不依赖监听器；监听器只编排，不放入 HTTP、链接解析、汇总算法或文件命名细节。
@@ -29,6 +30,8 @@
 Windows 便携交付先在开发机执行 `packaging/windows/build_portable.ps1`，通过测试后把入口及运行依赖冻结到 `release/`。发布包外置复制当前 `.env` 和汇总模板；目标电脑双击启动脚本后，以 `FeishuSalesBot.exe` 所在目录作为项目根目录进入下述相同数据流。
 
 纪要机器人有独立的便携交付：`packaging/windows/meeting/build_meeting_portable.ps1` 以 `run_meeting_minutes_bot.py` 为入口冻结出 `MeetingMinutesBot.exe`，随包收集 RapidOCR 的 ONNX 模型、onnxruntime 与 PyMuPDF 原生库和 `tzdata`，并外置复制当前 `.env.meeting-minutes`、人员 YAML 与正式模板。发布包的 `data/meeting_minutes` 与 `logs/meeting_minutes` 始终为空，不携带历史提交、附件或已生成的 DOCX。两个便携包的 EXE、启动器、锁文件和运行目录彼此独立。
+
+Linux（Ubuntu 24.04 x64）纪要便携包由 `packaging/linux/meeting/build_meeting_portable.sh` 在 **Linux 构建机** 上生成 `MeetingMinutesBot` onedir 与 `周例会纪要机器人-Linux-x64.tar.gz`，布局与 Windows 包对齐并附 systemd 示例；不能在 Windows 上交叉编译。
 
 ```text
 .env
@@ -93,9 +96,14 @@ Windows 便携交付先在开发机执行 `packaging/windows/build_portable.ps1`
             -> 图片 OCR / PDF 文字层 / DOCX / Markdown 提取
             -> DOCX 另存 data/meeting_minutes/submission_docs/<周期>/<message_id>.docx
             -> meeting_submissions 保存原文、文字摘要；DOCX 路径写入 formatted_content
+       -> 管理员私聊上传配置（免重启）
+            -> .yaml/.yml：校验后备份并覆盖人员 YAML，热替换 PeopleStore
+            -> 与正式模板同名的 .docx：校验占位符后备份并覆盖模板
+            -> 失败不覆盖线上文件；备份目录 data/meeting_minutes/config_backups/
        -> 查看我的纪要 / 撤回本周提交
-       -> 管理员：查看本周提交状态 / 生成本周纪要 / 重载人员配置
+       -> 管理员：查看本周提交状态 / 生成本周纪要 / 重载人员配置 / 校验配置
             -> 重载：重读人员 YAML + 校验模板占位符，通过后热替换共享 PeopleStore；失败保留原名单
+            -> 校验配置：只读体检磁盘 YAML、模板路径与占位符
             -> 按 Asia/Shanghai ISO 周查询有效提交
             -> 按 template_key 渲染正式模板；有源 DOCX 时把表格与内嵌图片原样注入对应人员段落
             -> data/meeting_minutes/output/<周期>_v<版本>_<时间戳>.docx
@@ -145,6 +153,7 @@ Windows 便携交付先在开发机执行 `packaging/windows/build_portable.ps1`
 - Lark SDK 日志统一传播到根日志管线；Lark 与 `httpx` 的最低级别固定为 `WARNING`，格式化器继续兜底清理 `access_key`、`ticket`、`access_token` 和 `app_secret` 查询参数。
 - 纪要机器人使用 `group_policy="disabled"`，只接收私聊；其锁文件、日志目录、SQLite、DOCX 输出和 `MEETING_BOT_` 环境变量不得与销售机器人复用。
 - 单实例锁只保护同一目录；同一飞书应用在多台电脑或多个目录同时运行会争抢消息，交付便携包后必须停止开发机实例。
+- 管理员可通过私聊上传 `.yaml`/`.yml` 或与正式模板同名的 `.docx` 热更新配置；旧文件备份在 `data/meeting_minutes/config_backups/`，校验失败不得覆盖线上文件。改 `.env` 仍需重启。
 
 ## 运行产物与安全
 

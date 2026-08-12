@@ -1,0 +1,26 @@
+# systemd unit example for the meeting-minutes portable package on Ubuntu 24.04.
+# 1. Replace WorkingDirectory / ExecStart absolute paths below.
+# 2. sudo cp meeting-minutes-bot.service.example /etc/systemd/system/meeting-minutes-bot.service
+# 3. sudo systemctl daemon-reload
+# 4. sudo systemctl enable --now meeting-minutes-bot
+#
+# Do not run the shell launcher and this unit at the same time against the same package.
+# Only one Feishu app instance may run globally (including Windows/dev machines).
+
+[Unit]
+Description=Feishu Meeting Minutes Bot
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+WorkingDirectory=/opt/meeting-minutes-bot/程序
+ExecStart=/opt/meeting-minutes-bot/程序/MeetingMinutesBot
+Restart=always
+RestartSec=5
+# Keep file descriptors and OCR model load reasonable on small VMs.
+LimitNOFILE=65535
+Environment=PYTHONUNBUFFERED=1
+
+[Install]
+WantedBy=multi-user.target

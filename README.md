@@ -43,7 +43,8 @@
 ├── logs/                     # 本地日志（Git 忽略）
 ├── tests/                    # 不访问真实飞书的 pytest 测试
 ├── packaging/windows/        # 销售机器人便携包构建与一键启动脚本
-├── packaging/windows/meeting/ # 纪要机器人便携包构建与一键启动脚本
+├── packaging/windows/meeting/ # 纪要机器人 Windows 便携包
+├── packaging/linux/meeting/  # 纪要机器人 Linux（Ubuntu）便携包
 ├── release/                  # 本地发布产物（Git 忽略，包含当前 .env）
 ├── docs/plans/               # 功能计划和执行记录
 ├── docs/meeting_minutes/     # 周例会纪要机器人使用说明
@@ -84,6 +85,17 @@ powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\packaging\windows\meet
 ```
 
 目标用户只需双击“启动机器人.cmd”，之后继续在飞书中使用。销售包见 [`docs/WINDOWS_PORTABLE_DEPLOYMENT.md`](docs/WINDOWS_PORTABLE_DEPLOYMENT.md)，纪要包见[便携发布包构建与交付](docs/meeting_minutes/便携发布包构建与交付.md)。
+
+### Linux（Ubuntu 24.04）纪要便携包
+
+必须在 **Linux x64** 上构建（不能在 Windows 交叉编译）。在 Ubuntu 项目根目录：
+
+```bash
+chmod +x packaging/linux/meeting/build_meeting_portable.sh
+./packaging/linux/meeting/build_meeting_portable.sh
+```
+
+产物为 `release/周例会纪要机器人-Linux-x64.tar.gz`。解压后执行 `./启动机器人.sh`，生产环境建议用包内 systemd 示例。详见[Linux 便携发布包构建与交付](docs/meeting_minutes/Linux便携发布包构建与交付.md)。
 
 两个发布包都会原样复制当前 `.env`，含 App Secret，必须点对点交付。纪要包沿用同一个飞书应用，交付后必须停止开发机上的纪要机器人，否则两个长连接会争抢同一条消息。
 
