@@ -210,6 +210,7 @@ wiki:wiki:readonly
 
 ## 工程协作与文档入口
 
+- [项目交接文档 2.0](docs/项目交接文档-v2.md)：给接手人看的简要交接。详细自查稿见 [项目交接文档.md](docs/项目交接文档.md)。
 - [架构地图](ARCHITECTURE.md)：模块边界、依赖方向和两条数据流。
 - [功能计划模板](docs/templates/feature-plan-template.md)：新增功能先写范围、决策、原子 Checklist 和验收。
 - [功能计划目录说明](docs/plans/README.md)：计划的命名、状态和归档规则。

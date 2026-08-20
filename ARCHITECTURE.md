@@ -114,6 +114,7 @@ Windows 便携交付先在开发机执行 `packaging/windows/build_portable.ps1`
 
 ## 文档维护规则
 
+- 离职或换人时先读 [`docs/项目交接文档-v2.md`](docs/项目交接文档-v2.md)；需要细则时再看 [`docs/项目交接文档.md`](docs/项目交接文档.md)。
 - 新功能从 `docs/templates/feature-plan-template.md` 创建计划，按 `docs/plans/README.md` 维护状态。
 - 模块、依赖方向、入口或数据流改变时更新本文档。
 - 目录职责变化时更新相应目录 README；业务、配置语义或工程规则的实质变更追加到 `VersionLog.md`。
