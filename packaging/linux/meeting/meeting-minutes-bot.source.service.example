@@ -1,0 +1,31 @@
+# systemd unit example for source + venv deploy on Ubuntu 24.04.
+# 1. Replace User / WorkingDirectory / ExecStart paths below.
+# 2. sudo cp meeting-minutes-bot.source.service.example /etc/systemd/system/meeting-minutes-bot.service
+# 3. sudo systemctl daemon-reload
+# 4. sudo systemctl enable --now meeting-minutes-bot
+#
+# Start limit: at most 5 starts within 60 seconds; then systemd stops retrying
+# until an admin runs: systemctl reset-failed && systemctl start
+#
+# Only one Feishu app instance may run globally (including Windows/dev machines).
+
+[Unit]
+Description=Feishu Meeting Minutes Bot (source)
+After=network-online.target
+Wants=network-online.target
+StartLimitIntervalSec=60
+StartLimitBurst=5
+
+[Service]
+Type=simple
+User=ubuntu
+WorkingDirectory=/opt/feishu_project
+ExecStart=/opt/feishu_project/.venv/bin/python -m meeting_minutes_bot
+Restart=always
+RestartSec=5
+OOMScoreAdjust=-500
+LimitNOFILE=65535
+Environment=PYTHONUNBUFFERED=1
+
+[Install]
+WantedBy=multi-user.target
